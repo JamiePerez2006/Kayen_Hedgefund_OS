@@ -5,3 +5,5 @@ matplotlib
 yfinance
 PyPortfolioOpt
 PyYAML
+plotly
+scipy
