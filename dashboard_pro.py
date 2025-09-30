@@ -207,6 +207,76 @@ ax1.set_yticks(range(len(corr.index)));   ax1.set_yticklabels(corr.index)
 fig1.tight_layout()
 st.pyplot(fig1)
 
+# -------------------- Backtest (Monthly Rebalance) --------------------
+st.subheader("Backtest (Monthly Rebalance)")
+bt_years = st.slider("Backtest years", 2, 10, years, key="bt_years")
+cost_bps = st.number_input("Transaction cost (bps per turnover)", 0, 200, 10, step=5, key="bt_cost_bps")
+
+@st.cache_data(show_spinner=False, ttl=300)
+def load_prices_bt(tickers, years):
+    return load_prices(tickers, years=years)
+
+px_bt  = load_prices_bt(tickers, years=bt_years)
+rets_bt = to_returns(px_bt, log=True).dropna()
+
+# Rebalance-Termine: 1. Handelstag des Monats
+rebal_dates = rets_bt.groupby([rets_bt.index.year, rets_bt.index.month]).head(1).index
+
+def rebalance_backtest(rets, dates, min_w, max_w, crypto_cap, cost_bps):
+    w = None
+    equity = [1.0]
+    last_w = None
+    for i, dt in enumerate(rets.index):
+        if (i == 0) or (dt in dates):
+            # Gewichte neu optimieren bis Stichtag dt
+            px_hist = px_bt.loc[:dt].dropna()
+            w, _ = try_min_vol_weights(px_hist, min_w=min_w, max_w=max_w)
+
+            # Crypto-Kappung
+            ca = [t for t in w.index if any(sym in t for sym in ["BTC","ETH","SOL","DOGE","ADA"])]
+            cs = float(w.reindex(ca).fillna(0.0).sum()) if ca else 0.0
+            if cs > crypto_cap:
+                scale = crypto_cap / cs if cs > 0 else 0.0
+                w.loc[ca] *= scale
+                nc = [t for t in w.index if t not in ca]
+                rem = 1.0 - w.sum()
+                if nc and rem > 0:
+                    w.loc[nc] += rem * (w.loc[nc] / w.loc[nc].sum())
+
+            # Transaktionskosten auf Turnover (bps)
+            if last_w is not None:
+                turnover = float((w - last_w).abs().sum())
+                equity[-1] *= (1.0 - (cost_bps / 10000.0) * turnover)
+
+            last_w = w.copy()
+
+        # Tagesrendite mit aktuellen Gewichten
+        r = float(rets.loc[dt].reindex(w.index).fillna(0.0).dot(w.values))
+        equity.append(equity[-1] * (1.0 + r))
+
+    idx = pd.Index([rets.index[0]] + list(rets.index), name="Date")
+    return pd.Series(equity, index=idx, name="Equity")
+
+eq = rebalance_backtest(rets_bt, rebal_dates, min_w=min_w, max_w=max_w, crypto_cap=crypto_cap, cost_bps=cost_bps)
+bt_ret = eq.pct_change().dropna()
+
+bt_cagr   = (eq.iloc[-1])**(252/len(bt_ret)) - 1
+bt_vol    = bt_ret.std() * np.sqrt(252)
+bt_sharpe = bt_ret.mean()/bt_ret.std()*np.sqrt(252) if bt_ret.std()!=0 else 0.0
+bt_mdd    = (eq/eq.cummax()-1).min()
+
+cA, cB, cC, cD = st.columns(4)
+cA.metric("Backtest CAGR",   f"{bt_cagr:.2%}")
+cB.metric("Backtest Vol",    f"{bt_vol:.2%}")
+cC.metric("Backtest Sharpe", f"{bt_sharpe:.2f}")
+cD.metric("Backtest MaxDD",  f"{bt_mdd:.2%}")
+
+fig_bt, ax_bt = plt.subplots()
+ax_bt.plot(eq.index, eq.values)
+ax_bt.set_title("Backtest Equity (Monthly Rebalance)")
+fig_bt.tight_layout()
+st.pyplot(fig_bt)
+
 # Rebalance Planner
 st.subheader("Rebalance Planner")
 if "current_weights" not in st.session_state:
