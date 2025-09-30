@@ -280,16 +280,33 @@ st.pyplot(fig_bt)
 # -------------------- Backtest: Benchmark & Interactive Chart --------------------
 import plotly.graph_objs as go
 
-bench_ticker = st.selectbox("Benchmark", ["SPY","ACWI","QQQ","IEF","GLD"], index=0, key="bench")
+bench_ticker = st.selectbox("Benchmark", ["SPY", "ACWI", "QQQ", "IEF", "GLD"], index=0, key="bench")
 
-bench_px = yf.download(bench_ticker, period=f"{bt_years}y", auto_adjust=True, progress=False)["Close"].dropna()
-bench_eq = (bench_px / bench_px.iloc[0]).reindex(eq.index).fillna(method="ffill").fillna(1.0)
+# Benchmark laden und auf den Backtest-Zeitraum/Index mappen
+bench_px = yf.download(
+    bench_ticker, period=f"{bt_years}y", auto_adjust=True, progress=False
+)["Close"].dropna()
 
+bench_eq = (bench_px / bench_px.iloc[0])
+# sicherstellen, dass eq existiert (kommt aus dem Backtest) und Index passt
+bench_eq = bench_eq.reindex(eq.index).fillna(method="ffill").fillna(1.0)
+
+# Falls trotzdem DataFrame entstanden ist: auf Series reduzieren
+if isinstance(bench_eq, pd.DataFrame):
+    bench_eq = bench_eq.iloc[:, 0]
+
+# --- Kennzahlen robust (immer auf Skalar casten) ---
 bench_ret = bench_eq.pct_change().dropna()
-b_cagr   = (bench_eq.iloc[-1])**(252/len(bench_ret)) - 1
-b_vol    = bench_ret.std() * np.sqrt(252)
-b_sharpe = bench_ret.mean()/bench_ret.std()*np.sqrt(252) if bench_ret.std()!=0 else 0.0
-b_mdd    = (bench_eq/bench_eq.cummax()-1).min()
+
+b_len   = len(bench_ret) if len(bench_ret) > 0 else 1
+b_end   = float(bench_eq.iloc[-1])
+b_mean  = float(bench_ret.mean()) if len(bench_ret) else 0.0
+b_std   = float(bench_ret.std())  if len(bench_ret) else 0.0
+
+b_cagr  = (b_end ** (252 / b_len)) - 1
+b_vol   = b_std * np.sqrt(252)
+b_sharpe = (b_mean / b_std * np.sqrt(252)) if b_std != 0 else 0.0
+b_mdd   = float((bench_eq / bench_eq.cummax() - 1.0).min())
 
 cE, cF, cG, cH = st.columns(4)
 cE.metric("Bench CAGR",   f"{b_cagr:.2%}")
@@ -297,34 +314,17 @@ cF.metric("Bench Vol",    f"{b_vol:.2%}")
 cG.metric("Bench Sharpe", f"{b_sharpe:.2f}")
 cH.metric("Bench MaxDD",  f"{b_mdd:.2%}")
 
+# --- Interaktiver Chart: Portfolio vs. Benchmark ---
 fig_int = go.Figure()
-fig_int.add_trace(go.Scatter(x=eq.index, y=eq.values,          name="Portfolio",   mode="lines"))
-fig_int.add_trace(go.Scatter(x=bench_eq.index, y=bench_eq.values, name=bench_ticker, mode="lines"))
+fig_int.add_trace(go.Scatter(x=eq.index,       y=eq.values,        name="Portfolio",    mode="lines"))
+fig_int.add_trace(go.Scatter(x=bench_eq.index, y=bench_eq.values,  name=bench_ticker,   mode="lines"))
 fig_int.update_layout(title="Portfolio vs. Benchmark (Index=1.0)", xaxis_title="Date", yaxis_title="Index")
 st.plotly_chart(fig_int, use_container_width=True)
 
-outperf = (eq / bench_eq) - 1.0
+# Outperformance (auf gemeinsamen Index)
+common_idx = eq.index.intersection(bench_eq.index)
+outperf = (eq.reindex(common_idx) / bench_eq.reindex(common_idx)) - 1.0
 st.write(f"Outperformance vs {bench_ticker} (letzter Stand): {float(outperf.iloc[-1]):.2%}")
-
-# Rebalance Planner
-st.subheader("Rebalance Planner")
-if "current_weights" not in st.session_state:
-    st.session_state.current_weights = weights.copy()
-current_df = pd.DataFrame({"Current Weight": st.session_state.current_weights.round(4)})
-edited = st.data_editor(current_df, use_container_width=True)
-current = edited["Current Weight"].reindex(weights.index).fillna(0.0)
-current_sum = float(current.sum())
-st.caption(f"Current weights sum: {current_sum:.2f} (should be ~1.00)")
-if current_sum != 0:
-    current = current / current_sum
-delta = (weights - current).rename("Delta (target - current)")
-prices = px.iloc[-1].reindex(weights.index).fillna(1.0)
-trade_notional = (delta * float(portfolio_value)).rename("Trade Notional (EUR)")
-plan = pd.concat([current.rename("Current"), weights.rename("Target"),
-                  delta, prices.rename("Last Price"), trade_notional], axis=1)
-st.dataframe(plan.round(6), use_container_width=True)
-buf = io.BytesIO(); plan.round(6).to_csv(buf, index=True)
-st.download_button("Download Rebalance Plan (CSV)", data=buf.getvalue(), file_name="rebalance_plan.csv", mime="text/csv")
 
 # Alerts (mit 10-Tage-Persistenz)
 st.subheader("Alerts")
