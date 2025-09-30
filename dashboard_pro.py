@@ -277,6 +277,35 @@ ax_bt.set_title("Backtest Equity (Monthly Rebalance)")
 fig_bt.tight_layout()
 st.pyplot(fig_bt)
 
+# -------------------- Backtest: Benchmark & Interactive Chart --------------------
+import plotly.graph_objs as go
+
+bench_ticker = st.selectbox("Benchmark", ["SPY","ACWI","QQQ","IEF","GLD"], index=0, key="bench")
+
+bench_px = yf.download(bench_ticker, period=f"{bt_years}y", auto_adjust=True, progress=False)["Close"].dropna()
+bench_eq = (bench_px / bench_px.iloc[0]).reindex(eq.index).fillna(method="ffill").fillna(1.0)
+
+bench_ret = bench_eq.pct_change().dropna()
+b_cagr   = (bench_eq.iloc[-1])**(252/len(bench_ret)) - 1
+b_vol    = bench_ret.std() * np.sqrt(252)
+b_sharpe = bench_ret.mean()/bench_ret.std()*np.sqrt(252) if bench_ret.std()!=0 else 0.0
+b_mdd    = (bench_eq/bench_eq.cummax()-1).min()
+
+cE, cF, cG, cH = st.columns(4)
+cE.metric("Bench CAGR",   f"{b_cagr:.2%}")
+cF.metric("Bench Vol",    f"{b_vol:.2%}")
+cG.metric("Bench Sharpe", f"{b_sharpe:.2f}")
+cH.metric("Bench MaxDD",  f"{b_mdd:.2%}")
+
+fig_int = go.Figure()
+fig_int.add_trace(go.Scatter(x=eq.index, y=eq.values,          name="Portfolio",   mode="lines"))
+fig_int.add_trace(go.Scatter(x=bench_eq.index, y=bench_eq.values, name=bench_ticker, mode="lines"))
+fig_int.update_layout(title="Portfolio vs. Benchmark (Index=1.0)", xaxis_title="Date", yaxis_title="Index")
+st.plotly_chart(fig_int, use_container_width=True)
+
+outperf = (eq / bench_eq) - 1.0
+st.write(f"Outperformance vs {bench_ticker} (letzter Stand): {float(outperf.iloc[-1]):.2%}")
+
 # Rebalance Planner
 st.subheader("Rebalance Planner")
 if "current_weights" not in st.session_state:
