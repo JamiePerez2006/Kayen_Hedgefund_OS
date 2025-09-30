@@ -1,0 +1,7 @@
+streamlit==1.33.0
+pypfopt==1.6.1
+yfinance
+pandas
+numpy
+matplotlib
+
