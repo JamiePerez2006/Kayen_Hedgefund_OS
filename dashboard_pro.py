@@ -321,9 +321,12 @@ fig_int.add_trace(go.Scatter(x=bench_eq.index, y=bench_eq.values,  name=bench_ti
 fig_int.update_layout(title="Portfolio vs. Benchmark (Index=1.0)", xaxis_title="Date", yaxis_title="Index")
 st.plotly_chart(fig_int, use_container_width=True)
 
-# Outperformance (auf gemeinsamen Index)
-common_idx = eq.index.intersection(bench_eq.index)
-outperf = (eq.reindex(common_idx) / bench_eq.reindex(common_idx)) - 1.0
+# Gemeinsame Datenpunkte robust ausrichten
+common_idx = eq.index.intersection(bench_eq.index).unique()
+peq = eq.loc[common_idx]
+beq = bench_eq.loc[common_idx]
+
+outperf = (peq / beq) - 1.0
 st.write(f"Outperformance vs {bench_ticker} (letzter Stand): {float(outperf.iloc[-1]):.2%}")
 
 # Alerts (mit 10-Tage-Persistenz)
