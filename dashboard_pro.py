@@ -330,6 +330,18 @@ outperf = (peq / beq) - 1.0
 st.write(f"Outperformance vs {bench_ticker} (letzter Stand): {float(outperf.iloc[-1]):.2%}")
 
 # Alerts (mit 10-Tage-Persistenz)
+# --- Ensure 'current' weights exist and are normalized for Alerts ---
+if "current" not in locals():
+    if "current_weights" in st.session_state:
+        current = pd.Series(st.session_state.current_weights, index=weights.index).fillna(0.0)
+    else:
+        # falls nichts im State ist: aktuelle = Zielgewichte als Fallback
+        current = weights.copy()
+
+current_sum = float(np.nansum(current.values))
+if not np.isfinite(current_sum) or current_sum == 0:
+    current_sum = 1.0
+current = current / current_sum
 st.subheader("Alerts")
 alerts = []
 if crypto_assets and crypto_sum > crypto_cap:
