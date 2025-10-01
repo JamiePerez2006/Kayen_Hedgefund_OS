@@ -1,9 +1,10 @@
 streamlit
+yfinance
 pandas
 numpy
-matplotlib
-yfinance
-PyPortfolioOpt
-PyYAML
 plotly
-scipy
+matplotlib
+scikit-learn
+statsmodels
+pypfopt
+reportlab
