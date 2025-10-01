@@ -328,32 +328,34 @@ eq = rebalance_backtest(
     cost_bps=cost_bps,
 )
 
-    # ---------------- Benchmark-Vergleich ----------------
-    bench_ticker = st.selectbox("Benchmark", ["SPY","ACWI","QQQ","IEF","GLD"], index=0, key="benchf")
+# ---------------- Benchmark-Vergleich ----------------
+bench_ticker = st.selectbox("Benchmark", ["SPY", "ACWI", "QQQ", "IEF", "GLD"], index=0, key="benchf")
 
-    @st.cache_data(show_spinner=False, ttl=300)
-    def load_bench(ticker, years):
-        bpx = yf.download(ticker, period=f"{years}y", auto_adjust=True, progress=False)["Close"].dropna()
-        return bpx
+@st.cache_data(show_spinner=False, ttl=300)
+def load_bench(ticker, years):
+    period = f"{years}y"
+    bpx = yf.download(ticker, period=period, auto_adjust=True, progress=False)["Close"].dropna()
+    return bpx
 
-    bench_px = load_bench(bench_ticker, bt_years)
-    # auf gemeinsamen Zeitraum schneiden & auf 1.0 normieren
-    common_idx = eq.index.intersection(bench_px.index)
-    bench_eq = bench_px.loc[common_idx] / bench_px.loc[common_idx].iloc[0]
-    port_eq  = eq.loc[common_idx] / eq.loc[common_idx].iloc[0]
+bench_px = load_bench(bench_ticker, bt_years)
 
-    # Chart: Portfolio vs Benchmark (Index = 1.0)
-    fig_bt = go.Figure()
-    fig_bt.add_trace(go.Scatter(x=common_idx, y=port_eq.values,  name="Portfolio", mode="lines"))
-    fig_bt.add_trace(go.Scatter(x=common_idx, y=bench_eq.values, name=bench_ticker, mode="lines"))
-    fig_bt.update_layout(title="Portfolio vs. Benchmark (Index=1.0)",
-                         xaxis_title="Date", yaxis_title="Index",
-                         margin=dict(l=0,r=0,t=40,b=0), height=420)
-    st.plotly_chart(fig_bt, use_container_width=True)
+# auf gemeinsamen Zeitraum schneiden & auf 1.0 normieren
+common_idx = eq.index.intersection(bench_px.index)
+bench_eq = bench_px.loc[common_idx] / bench_px.loc[common_idx].iloc[0]
+port_eq  = eq.loc[common_idx] / eq.loc[common_idx].iloc[0]
 
-    # Outperformance (Portfolio / Benchmark)
-    outperf = (port_eq / bench_eq) - 1.0
-    st.write(f"Outperformance vs {bench_ticker} (letzter Stand): {float(outperf.iloc[-1]):.2%}")
+# Chart: Portfolio vs Benchmark (Index = 1.0)
+fig_bt = go.Figure()
+fig_bt.add_trace(go.Scatter(x=common_idx, y=port_eq.values,  name="Portfolio",     mode="lines"))
+fig_bt.add_trace(go.Scatter(x=common_idx, y=bench_eq.values, name=bench_ticker,    mode="lines"))
+fig_bt.update_layout(title="Portfolio vs. Benchmark (Index=1.0)",
+                     xaxis_title="Date", yaxis_title="Index",
+                     margin=dict(l=0, r=0, t=40, b=0), height=420)
+st.plotly_chart(fig_bt, use_container_width=True)
+
+outperf = (port_eq / bench_eq) - 1.0
+st.write(f"Outperformance vs {bench_ticker} (letzter Stand): {float(outperf.iloc[-1]):.2%}")
+
 # ----------------------- Backtest: Benchmark & Interactive Chart -----------------------
 # --- Benchmark: sicherstellen, dass wir eine Equity-Kurve und den Index haben ---
 try:
