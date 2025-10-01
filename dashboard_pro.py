@@ -273,57 +273,65 @@ with tab_backtest:
     # Rebalance-Termine: 1. Handelstag jedes Monats
     rebal_dates = rets_bt.groupby([rets_bt.index.year, rets_bt.index.month]).head(1).index
 
-# --- Backtest-Funktion: monatliche Rebalance, Kosten auf Turnover ---
+    # --- Backtest-Funktion: monatliche Rebalance, Kosten auf Turnover ---
 def rebalance_backtest(px, rets, dates, min_w, max_w, crypto_cap, cost_bps):
     """
-    px: Preise (DataFrame), rets: Returns (DataFrame), dates: Rebalance-Daten (DatetimeIndex)
+    px: Preise (DataFrame)
+    rets: Returns (DataFrame)
+    dates: Rebalance-Daten (DatetimeIndex)
     """
-    w = None
-    eq = []          # Equity-Kurve
-    equity = 1.0
-    last_w = None
+    w = None            # Gewichte
+    last_w = None       # Letzte Gewichte
+    eq = []             # Equity-Kurve
+    equity = 1.0        # Startwert
 
     for dt in rets.index:
-        # Rebalance an den Terminen: neue Gewichte bestimmen
+        # Rebalance an Stichtagen
         if dt in dates:
             px_hist = px.loc[:dt].dropna()
-            w = try_min_vol_weights(px_hist, min_w=min_w, max_w=max_w)
+            w_new = try_min_vol_weights(px_hist, min_w=min_w, max_w=max_w)
 
             # Crypto-Kappung
-            ca = [t for t in w.index if any(sym in t for sym in ["BTC", "ETH", "SOL", "DOGE", "ADA"])]
-            cs = float(w.reindex(ca).fillna(0.0).sum()) if ca else 0.0
-            if cs > crypto_cap:
-                scale = crypto_cap / cs
-                w.loc[ca] *= scale
-                non_ca = [t for t in w.index if t not in ca]
-                rem = 1.0 - w.sum()
-                if non_ca and rem > 0:
-                    w.loc[non_ca] += rem * (w.loc[non_ca] / w.loc[non_ca].sum())
+            if crypto_cap > 0:
+                ca = [t for t in w_new.index if any(sym in t for sym in ["BTC", "ETH", "SOL", "DOGE", "ADA"])]
+                cs = float(w_new.reindex(ca).fillna(0.0).sum()) if ca else 0.0
+                if cs > crypto_cap:
+                    scale = crypto_cap / cs if cs > 0 else 0.0
+                    w_new.loc[ca] *= scale
+                    nc = [t for t in w_new.index if t not in ca]
+                    if nc:
+                        w_new.loc[nc] *= (1.0 - w_new.loc[ca].sum()) / w_new.loc[nc].sum()
 
-            # Transaktionskosten auf Turnover anwenden
+            # Transaktionskosten auf Turnover
             if last_w is not None:
-                turnover = float((w - last_w).abs().sum())
+                turnover = float((w_new - last_w).abs().sum())
                 equity *= (1.0 - (cost_bps / 10000.0) * turnover)
 
-            last_w = w.copy()
+            # Neue Gewichte übernehmen
+            w = w_new
+            last_w = w_new.copy()
 
-        # Tages-Performance mit aktuellen Gewichten
+        # Falls vor erster Rebalance keine Gewichte: Equal-Weight
         if w is None:
-            w = pd.Series(1.0/len(rets.columns), index=rets.columns)
-        r = float(rets.loc[dt].reindex(w.index).fillna(0.0).dot(w.values))
-        equity = float(equity * (1.0 + r))
+            w = pd.Series(1.0 / len(rets.columns), index=rets.columns)
+
+        # Tages-Return mit aktuellen Gewichten
+        r = float(rets.loc[dt].reindex(w.index).fillna(0.0).dot(w))
+        equity *= (1.0 + r)
         eq.append(equity)
 
     return pd.Series(eq, index=rets.index, name="Portfolio")
-    
- eq = rebalance_backtest(
-    px_bt,                 # Preise mitgeben
+
+
+# Backtest laufen lassen
+eq = rebalance_backtest(
+    px_bt,
     rets_bt,
     rebal_dates,
     min_w=min_w,
     max_w=max_w,
-    crypto_cap=crypto_cap, # Kappung aus dem linken Slider
-    cost_bps=cost_bps
+    crypto_cap=crypto_cap,
+    cost_bps=cost_bps,
 )
 
     # ---------------- Benchmark-Vergleich ----------------
