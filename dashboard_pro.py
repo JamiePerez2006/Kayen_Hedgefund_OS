@@ -285,6 +285,11 @@ def rebalance_backtest(px, rets, dates, min_w, max_w, crypto_cap, cost_bps):
         if dt in dates:
             px_hist = px.loc[:dt].dropna()
             w_new = try_min_vol_weights(px_hist, min_w=min_w, max_w=max_w)
+            # w_new hat manchmal keinen Index (NumPy-Array) -> in Series mit korrektem Index wandeln
+if not isinstance(w_new, pd.Series):
+    w_new = pd.Series(np.asarray(w_new).ravel(), index=px_hist.columns, dtype=float)
+else:
+    w_new = w_new.reindex(px_hist.columns).astype(float)
 
             # Crypto-Kappung
             if crypto_cap > 0:
