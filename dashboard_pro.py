@@ -274,7 +274,7 @@ with tab_backtest:
     rebal_dates = rets_bt.groupby([rets_bt.index.year, rets_bt.index.month]).head(1).index
 
     # --- Backtest-Funktion: monatliche Rebalance, Kosten auf Turnover ---
-    def rebalance_backtest(px, rets, dates, min_w, max_w, crypto_cap, cost_bps):
+def rebalance_backtest(px, rets, dates, min_w, max_w, crypto_cap, cost_bps):
     """
     px: Preise (DataFrame)
     rets: Returns (DataFrame)
