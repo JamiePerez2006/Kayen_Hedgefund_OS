@@ -345,24 +345,71 @@ def rebalance_backtest(px, rets, dates, min_w, max_w, cost_bps):
     # Outperformance (Portfolio / Benchmark)
     outperf = (port_eq / bench_eq) - 1.0
     st.write(f"Outperformance vs {bench_ticker} (letzter Stand): {float(outperf.iloc[-1]):.2%}")
-
-# -------------------- Backtest: Benchmark & Interactive Chart --------------------
+# ----------------------- Backtest: Benchmark & Interactive Chart -----------------------
 import plotly.graph_objs as go
 
+# Benchmark-Auswahl
 bench_ticker = st.selectbox("Benchmark", ["SPY", "ACWI", "QQQ", "IEF", "GLD"], index=0, key="bench")
 
-# Benchmark laden und auf den Backtest-Zeitraum/Index mappen
-bench_px = yf.download(
-    bench_ticker, period=f"{bt_years}y", auto_adjust=True, progress=False
-)["Close"].dropna()
+# Benchmark laden und auf denselben Zeitraum wie das Backtest-Equity (eq) mappen
+try:
+    bench_px = yf.download(
+        bench_ticker,
+        period=f"{bt_years}y",
+        auto_adjust=True,
+        progress=False
+    )["Close"].dropna()
 
-bench_eq = (bench_px / bench_px.iloc[0])
-# sicherstellen, dass eq existiert (kommt aus dem Backtest) und Index passt
-bench_eq = bench_eq.reindex(eq.index).fillna(method="ffill").fillna(1.0)
+    # Benchmark auf Index 1 normieren und auf den eq-Index bringen
+    bench_eq = (bench_px / bench_px.iloc[0]).reindex(eq.index).ffill().fillna(1.0)
+except Exception:
+    # Fallback: wenn Download/Mapping schiefgeht, konstant 1.0 als Benchmark
+    bench_eq = pd.Series(1.0, index=eq.index, name="Benchmark")
 
-# Falls trotzdem DataFrame entstanden ist: auf Series reduzieren
-if isinstance(bench_eq, pd.DataFrame):
-    bench_eq = bench_eq.iloc[:, 0]
+# Kennzahlen (nur berechnen, wenn genügend Daten vorhanden sind)
+eq_ret = eq.pct_change().dropna()
+bench_ret = bench_eq.pct_change().dropna()
+
+if len(eq_ret) >= 2 and len(bench_ret) >= 2:
+    def ann_cagr(s):
+        r = s.iloc[-1] / s.iloc[0]
+        years = max((s.index[-1] - s.index[0]).days / 365.25, 1e-6)
+        return r ** (1 / years) - 1
+
+    p_cagr = ann_cagr(eq)
+    b_cagr = ann_cagr(bench_eq)
+
+    p_vol = eq_ret.std() * np.sqrt(252)
+    b_vol = bench_ret.std() * np.sqrt(252)
+
+    p_sharpe = (eq_ret.mean() / (p_vol / np.sqrt(252))) if p_vol != 0 else 0.0
+    b_sharpe = (bench_ret.mean() / (b_vol / np.sqrt(252))) if b_vol != 0 else 0.0
+
+    p_mdd = (eq / eq.cummax()).min() - 1
+    b_mdd = (bench_eq / bench_eq.cummax()).min() - 1
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: st.metric("Bench CAGR", f"{b_cagr:.2%}")
+    with c2: st.metric("Bench Vol", f"{b_vol:.2%}")
+    with c3: st.metric("Bench Sharpe*", f"{b_sharpe:.2f}")
+    with c4: st.metric("Bench MaxDD", f"{b_mdd:.2%}")
+
+# Gemeinsames Plot-Fenster (Index=1 normiert)
+common_idx = eq.index.union(bench_eq.index).unique().sort_values()
+eq_plot = eq.reindex(common_idx).fillna(method="ffill").fillna(1.0)
+bench_plot = bench_eq.reindex(common_idx).fillna(method="ffill").fillna(1.0)
+
+fig_int = go.Figure()
+fig_int.add_trace(go.Scatter(x=common_idx, y=eq_plot.values, name="Portfolio", mode="lines"))
+fig_int.add_trace(go.Scatter(x=common_idx, y=bench_plot.values, name=bench_ticker, mode="lines"))
+fig_int.update_layout(
+    title="Portfolio vs. Benchmark (Index=1.0)",
+    xaxis_title="Date",
+    yaxis_title="Index",
+    template="plotly_dark",
+    hovermode="x unified",
+)
+st.plotly_chart(fig_int, use_container_width=True)
 
 # --- Kennzahlen robust (immer auf Skalar casten) ---
 bench_ret = bench_eq.pct_change().dropna()
