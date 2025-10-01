@@ -275,49 +275,54 @@ with tab_backtest:
 
     # --- Backtest-Funktion: monatliche Rebalance, Kosten auf Turnover ---
 def rebalance_backtest(px, rets, dates, min_w, max_w, crypto_cap, cost_bps):
+    # px: Preise (DataFrame) | rets: Returns (DataFrame) | dates: Rebalance-Daten (DatetimeIndex)
     w = None
     last_w = None
     eq = []
     equity = 1.0
 
     for dt in rets.index:
-        # an Rebalance-Tagen neue Gewichte bestimmen
+        # An Rebalance-Tagen neue Gewichte bestimmen
         if dt in dates:
             px_hist = px.loc[:dt].dropna()
             w_new = try_min_vol_weights(px_hist, min_w=min_w, max_w=max_w)
-            # w_new hat manchmal keinen Index (NumPy-Array) -> in Series mit korrektem Index wandeln
-if not isinstance(w_new, pd.Series):
-    w_new = pd.Series(np.asarray(w_new).ravel(), index=px_hist.columns, dtype=float)
-else:
-    w_new = w_new.reindex(px_hist.columns).astype(float)
 
-            # Crypto-Kappung
+            # w_new hat manchmal keinen Index (NumPy-Array) -> in Series mit korrektem Index wandeln
+            if not isinstance(w_new, pd.Series):
+                w_new = pd.Series(np.asarray(w_new).ravel(), index=px_hist.columns, dtype=float)
+            else:
+                w_new = w_new.reindex(px_hist.columns).astype(float)
+
+            # Crypto-Kappung (nur anwenden, wenn wir heute wirklich neue Gewichte haben)
             if crypto_cap > 0:
                 ca = [t for t in w_new.index if any(sym in t for sym in ("BTC", "ETH", "SOL", "DOGE", "ADA"))]
                 cs = float(w_new.reindex(ca).fillna(0.0).sum()) if ca else 0.0
                 if cs > crypto_cap:
-                    scale = crypto_cap / cs if cs > 0 else 0.0
+                    scale = crypto_cap / cs
+                    # Crypto-Teil skalieren
                     w_new.loc[ca] = w_new.loc[ca] * scale
+                    # Nicht-Crypto normalisieren, damit Summe wieder 1.0 ist
                     nc = [t for t in w_new.index if t not in ca]
                     if nc:
-                        w_new.loc[nc] = w_new.loc[nc] * ((1.0 - w_new.loc[ca].sum()) / w_new.loc[nc].sum())
+                        rest = max(w_new.loc[nc].sum(), 1e-12)
+                        w_new.loc[nc] = w_new.loc[nc] * (1.0 - w_new.loc[ca].sum()) / rest
 
             # Transaktionskosten auf Turnover (bps)
             if last_w is not None:
                 turnover = float((w_new - last_w).abs().sum())
-                equity = equity * (1.0 - (cost_bps / 10000.0) * turnover)
+                equity *= (1.0 - (cost_bps / 10000.0) * turnover)
 
             # Gewichte übernehmen
             w = w_new
             last_w = w_new.copy()
 
-        # Falls vor erster Rebalance keine Gewichte: Equal-Weight
+        # Falls vor der ersten Rebalance noch keine Gewichte: Equal-Weight
         if w is None:
-            w = pd.Series(1.0 / len(rets.columns), index=rets.columns)
+            w = pd.Series(1.0 / len(rets.columns), index=rets.columns, dtype=float)
 
-        # Tages-Return mit aktuellen Gewichten
+        # Tages-Return mit aktuellen Gewichten (Index sicher ausrichten)
         r = float(rets.loc[dt].reindex(w.index).fillna(0.0).dot(w))
-        equity = equity * (1.0 + r)
+        equity *= (1.0 + r)
         eq.append(equity)
 
     return pd.Series(eq, index=rets.index, name="Portfolio")
