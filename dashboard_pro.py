@@ -388,10 +388,14 @@ with tab_backtest:
     c2.metric("Backtest Vol", f"{bt_vol:.2%}")
     c3.metric("Backtest Sharpe", f"{bt_sha:.2f}")
     c4.metric("Backtest MaxDD", f"{bt_mdd:.2%}")
-    
-    # ---- Outperformance-Text (Skalar statt Series) ----
+
+common   = eq.index.intersection(bench_px.index)
+bench_eq = (bench_px.loc[common] / bench_px.loc[common].iloc[0]).astype(float)
+port_eq  = (eq.loc[common]   /  eq.loc[common].iloc[0]).astype(float)
+
+# ---- Outperformance-Text (Skalar statt Series) ----
 if len(port_eq) and len(bench_eq):
-    outp = float(port_eq.iloc[-1] / bench_eq.iloc[-1] - 1.0)
+    outp = float(port_eq.iloc[-1]) / float(bench_eq.iloc[-1]) - 1.0
     st.markdown(f"**Outperformance vs {bench_ticker}: {outp:.2%}**")
 else:
     st.markdown("Outperformance: n/a")
