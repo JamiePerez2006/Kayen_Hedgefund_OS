@@ -8,6 +8,46 @@ import yfinance as yf
 import matplotlib.pyplot as plt
 import streamlit as st
 
+st.set_page_config(layout="wide", page_title="MAXI Hedgefund — Pro")
+
+# ---- Plotly: einheitliches Template ----
+import plotly.io as pio
+import plotly.graph_objs as go
+
+pio.templates["kayen"] = go.layout.Template(
+    layout=go.Layout(
+        font=dict(family="Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif", size=14),
+        paper_bgcolor="#0e1117",
+        plot_bgcolor="#0e1117",
+        colorway=["#22d3ee", "#14b8a6", "#f59e0b", "#f43f5e", "#a78bfa"]
+    )
+)
+pio.templates.default = "kayen"
+
+# ---- Premium CSS ----
+CUSTOM_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+html, body, [class*="css"] { font-family: 'Inter', system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+.block-container { padding-top: 1.4rem; padding-bottom: 1.6rem; }
+h1, h2, h3 { letter-spacing: .2px; }
+.kpi-card { background:rgba(22,26,35,.78); border:1px solid rgba(255,255,255,.06);
+            border-radius:14px; padding:16px 18px; box-shadow:0 10px 28px rgba(0,0,0,.28); }
+.kpi-big { font-size:2.0rem; font-weight:800; color:#ecfeff; line-height:1.15; }
+.kpi-label { color:#9ca3af; font-size:.92rem; }
+hr { border: none; height: 1px; background: linear-gradient(90deg, transparent, rgba(255,255,255,.10), transparent); }
+</style>
+"""
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
+# ---- Header ----
+c1, c2 = st.columns([0.80, 0.20])
+with c1:
+    st.markdown("## MAXI HEDGEFUND — Pro")
+with c2:
+    st.caption(datetime.now().strftime("%d.%m.%Y %H:%M"))
+st.markdown("<hr/>", unsafe_allow_html=True)
+
 @st.cache_data(show_spinner=False, ttl=300)
 def load_prices(tickers, years=5):
     period = f"{years}y"
@@ -161,121 +201,132 @@ hist_var = roll.apply(lambda x: -np.sort(x)[max(1, int(0.05*len(x)))], raw=True)
 sig_var  = persistent_flag(hist_var.dropna(), lambda v: v > 0.02, lookback=10)
 sig_dd   = persistent_flag(rolling_dd.dropna(),   lambda v: v < -0.15, lookback=10)
 
-# KPI-Karten
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Portfolio Index", f"{cum.iloc[-1]:.2f}x")
-c2.metric("Sharpe", f"{sharpe:.2f}")
-c3.metric(f"VaR({int(alpha*100)}%)", f"{var:.2%}")
-c4.metric("Max Drawdown", f"{mdd:.2%}")
-st.write(f"Optimizer used: {'PyPortfolioOpt (min vol)' if used_optimizer else 'Fallback Equal-Weight'}")
-if crypto_assets:
-    st.write(f"Crypto exposure: {crypto_sum:.2%}  (cap {crypto_cap:.0%})")
+tab_overview, tab_risk, tab_backtest, tab_trades = st.tabs(["Overview", "Risk", "Backtest", "Trades"])
 
-# Tabellen
-lcol, rcol = st.columns([1.2, 1.0])
-with lcol:
-    st.subheader("Portfolio Overview (target)")
-    ytds = {t: ytd_return(px[t].dropna()) for t in weights.index if t in px.columns}
-    cov = rets.cov()
-    rc = (cov.values @ weights.values.reshape(-1,1) * weights.values.reshape(-1,1)).ravel()
-    rc = pd.Series(rc, index=weights.index).clip(lower=0.0)
-    table = pd.DataFrame({
-        "Weight": weights.round(4),
-        "YTD Return": pd.Series(ytds).round(4),
-        "Risk Share": (rc/rc.sum()).round(4) if rc.sum()>0 else rc
-    })
-    st.dataframe(table, use_container_width=True)
-with rcol:
-    st.subheader("Risk Metrics")
-    risk_df = pd.DataFrame({
-        "Annualized Return":[ann_ret],
-        "Annualized Volatility":[ann_vol],
-        "Sharpe":[sharpe],
-        f"VaR({int(alpha*100)}%)":[var],
-        f"CVaR({int(alpha*100)}%) (approx)":[es],
-        "Max Drawdown":[mdd],
-    }).round(4)
-    st.dataframe(risk_df, use_container_width=True)
+with tab_overview:
+    st.subheader("Overview")
 
-# Heatmap
-st.subheader("Correlation Heatmap")
-fig1, ax1 = plt.subplots()
-corr = rets.corr()
-im = ax1.imshow(corr.values)
-ax1.set_xticks(range(len(corr.columns))); ax1.set_xticklabels(corr.columns, rotation=45, ha="right")
-ax1.set_yticks(range(len(corr.index)));   ax1.set_yticklabels(corr.index)
-fig1.tight_layout()
-st.pyplot(fig1)
+    # KPI-Karten
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Portfolio Index", f"{cum.iloc[-1]:.2f}x")
+    c2.metric("Sharpe", f"{sharpe:.2f}")
+    c3.metric(f"VaR({int(alpha*100)}%)", f"{var:.2%}")
+    c4.metric("Max Drawdown", f"{mdd:.2%}")
+    st.write(f"Optimizer used: {'PyPortfolioOpt (min vol)' if used_optimizer else 'Fallback Equal-Weight'}")
+    if crypto_assets:
+        st.write(f"Crypto exposure: {crypto_sum:.2%}  (cap {crypto_cap:.0%})")
+    
+    # Tabellen
+    lcol, rcol = st.columns([1.2, 1.0])
+    with lcol:
+        st.subheader("Portfolio Overview (target)")
+        ytds = {t: ytd_return(px[t].dropna()) for t in weights.index if t in px.columns}
+        cov = rets.cov()
+        rc = (cov.values @ weights.values.reshape(-1,1) * weights.values.reshape(-1,1)).ravel()
+        rc = pd.Series(rc, index=weights.index).clip(lower=0.0)
+        table = pd.DataFrame({
+            "Weight": weights.round(4),
+            "YTD Return": pd.Series(ytds).round(4),
+            "Risk Share": (rc/rc.sum()).round(4) if rc.sum()>0 else rc
+        })
+        st.dataframe(table, use_container_width=True)
+    with rcol:
+        st.subheader("Risk Metrics")
+        risk_df = pd.DataFrame({
+            "Annualized Return":[ann_ret],
+            "Annualized Volatility":[ann_vol],
+            "Sharpe":[sharpe],
+            f"VaR({int(alpha*100)}%)":[var],
+            f"CVaR({int(alpha*100)}%) (approx)":[es],
+            "Max Drawdown":[mdd],
+        }).round(4)
+        st.dataframe(risk_df, use_container_width=True)
+    
+    # Heatmap
+    st.subheader("Correlation Heatmap")
+    fig1, ax1 = plt.subplots()
+    corr = rets.corr()
+    im = ax1.imshow(corr.values)
+    ax1.set_xticks(range(len(corr.columns))); ax1.set_xticklabels(corr.columns, rotation=45, ha="right")
+    ax1.set_yticks(range(len(corr.index)));   ax1.set_yticklabels(corr.index)
+    fig1.tight_layout()
+    st.pyplot(fig1)
 
-# -------------------- Backtest (Monthly Rebalance) --------------------
-st.subheader("Backtest (Monthly Rebalance)")
-bt_years = st.slider("Backtest years", 2, 10, years, key="bt_years")
-cost_bps = st.number_input("Transaction cost (bps per turnover)", 0, 200, 10, step=5, key="bt_cost_bps")
+# ---------------- Backtest (Monthly Rebalance) ----------------
+with tab_backtest:
+    import plotly.graph_objects as go
 
-@st.cache_data(show_spinner=False, ttl=300)
-def load_prices_bt(tickers, years):
-    return load_prices(tickers, years=years)
+    st.subheader("Backtest · Performance vs Benchmark")
 
-px_bt  = load_prices_bt(tickers, years=bt_years)
-rets_bt = to_returns(px_bt, log=True).dropna()
+    # Parameter für den Backtest
+    bt_years = st.slider("Backtest years", 2, 10, years, key="bt_years")
+    cost_bps = st.number_input("Transaction cost (bps per turnover)", 0, 200, 10, step=5, key="bt_cost_bps")
 
-# Rebalance-Termine: 1. Handelstag des Monats
-rebal_dates = rets_bt.groupby([rets_bt.index.year, rets_bt.index.month]).head(1).index
+    @st.cache_data(show_spinner=False, ttl=300)
+    def load_prices_bt(tickers, years):
+        return load_prices(tickers, years=years)
 
-def rebalance_backtest(rets, dates, min_w, max_w, crypto_cap, cost_bps):
-    w = None
-    equity = [1.0]
-    last_w = None
-    for i, dt in enumerate(rets.index):
-        if (i == 0) or (dt in dates):
-            # Gewichte neu optimieren bis Stichtag dt
-            px_hist = px_bt.loc[:dt].dropna()
-            w, _ = try_min_vol_weights(px_hist, min_w=min_w, max_w=max_w)
+    # Daten für Backtest laden
+    px_bt = load_prices_bt(tickers, years=bt_years)
+    rets_bt = to_returns(px_bt, log=True).dropna()
 
-            # Crypto-Kappung
-            ca = [t for t in w.index if any(sym in t for sym in ["BTC","ETH","SOL","DOGE","ADA"])]
-            cs = float(w.reindex(ca).fillna(0.0).sum()) if ca else 0.0
-            if cs > crypto_cap:
-                scale = crypto_cap / cs if cs > 0 else 0.0
-                w.loc[ca] *= scale
-                nc = [t for t in w.index if t not in ca]
-                rem = 1.0 - w.sum()
-                if nc and rem > 0:
-                    w.loc[nc] += rem * (w.loc[nc] / w.loc[nc].sum())
+    # Rebalance-Termine: 1. Handelstag jedes Monats
+    rebal_dates = rets_bt.groupby([rets_bt.index.year, rets_bt.index.month]).head(1).index
 
-            # Transaktionskosten auf Turnover (bps)
-            if last_w is not None:
-                turnover = float((w - last_w).abs().sum())
-                equity[-1] *= (1.0 - (cost_bps / 10000.0) * turnover)
+    # --- Backtest-Funktion: monatliche Rebalance, Kosten auf Turnover ---
+    def rebalance_backtest(px, rets, dates, min_w, max_w, cost_bps):
+        """px: Preise (DataFrame), rets: Returns (DataFrame), dates: Rebalance-Daten (DatetimeIndex)"""
+        w = None
+        last_w = None
+        eq = []               # Equity-Kurve
+        equity = 1.0          # Start bei 1.0
+        for dt in rets.index:
+            # an Rebalance-Tagen neue Gewichte bestimmen
+            if dt in dates:
+                px_hist = px.loc[:dt].dropna()
+                w = try_min_vol_weights(px_hist, min_w=min_w, max_w=max_w)
+                # Transaktionskosten auf Turnover anwenden
+                if last_w is not None:
+                    turnover = float(np.abs(w - last_w).sum())
+                    equity *= (1.0 - (cost_bps/10000.0) * turnover)
+                last_w = w.copy()
+            # Tages-Performance mit aktuellen Gewichten
+            if w is None:
+                # Falls noch keine Gewichte (ganz am Anfang)
+                w = pd.Series(1.0/len(rets.columns), index=rets.columns)
+            equity *= (1.0 + float(rets.loc[dt] @ w))
+            eq.append(equity)
+        return pd.Series(eq, index=rets.index, name="Portfolio")
 
-            last_w = w.copy()
+    # Backtest laufen lassen
+    eq = rebalance_backtest(px_bt, rets_bt, rebal_dates, min_w=min_w, max_w=max_w, cost_bps=cost_bps)
 
-        # Tagesrendite mit aktuellen Gewichten
-        r = float(rets.loc[dt].reindex(w.index).fillna(0.0).dot(w.values))
-        equity.append(equity[-1] * (1.0 + r))
+    # ---------------- Benchmark-Vergleich ----------------
+    bench_ticker = st.selectbox("Benchmark", ["SPY","ACWI","QQQ","IEF","GLD"], index=0, key="benchf")
 
-    idx = pd.Index([rets.index[0]] + list(rets.index), name="Date")
-    return pd.Series(equity, index=idx, name="Equity")
+    @st.cache_data(show_spinner=False, ttl=300)
+    def load_bench(ticker, years):
+        bpx = yf.download(ticker, period=f"{years}y", auto_adjust=True, progress=False)["Close"].dropna()
+        return bpx
 
-eq = rebalance_backtest(rets_bt, rebal_dates, min_w=min_w, max_w=max_w, crypto_cap=crypto_cap, cost_bps=cost_bps)
-bt_ret = eq.pct_change().dropna()
+    bench_px = load_bench(bench_ticker, bt_years)
+    # auf gemeinsamen Zeitraum schneiden & auf 1.0 normieren
+    common_idx = eq.index.intersection(bench_px.index)
+    bench_eq = bench_px.loc[common_idx] / bench_px.loc[common_idx].iloc[0]
+    port_eq  = eq.loc[common_idx] / eq.loc[common_idx].iloc[0]
 
-bt_cagr   = (eq.iloc[-1])**(252/len(bt_ret)) - 1
-bt_vol    = bt_ret.std() * np.sqrt(252)
-bt_sharpe = bt_ret.mean()/bt_ret.std()*np.sqrt(252) if bt_ret.std()!=0 else 0.0
-bt_mdd    = (eq/eq.cummax()-1).min()
+    # Chart: Portfolio vs Benchmark (Index = 1.0)
+    fig_bt = go.Figure()
+    fig_bt.add_trace(go.Scatter(x=common_idx, y=port_eq.values,  name="Portfolio", mode="lines"))
+    fig_bt.add_trace(go.Scatter(x=common_idx, y=bench_eq.values, name=bench_ticker, mode="lines"))
+    fig_bt.update_layout(title="Portfolio vs. Benchmark (Index=1.0)",
+                         xaxis_title="Date", yaxis_title="Index",
+                         margin=dict(l=0,r=0,t=40,b=0), height=420)
+    st.plotly_chart(fig_bt, use_container_width=True)
 
-cA, cB, cC, cD = st.columns(4)
-cA.metric("Backtest CAGR",   f"{bt_cagr:.2%}")
-cB.metric("Backtest Vol",    f"{bt_vol:.2%}")
-cC.metric("Backtest Sharpe", f"{bt_sharpe:.2f}")
-cD.metric("Backtest MaxDD",  f"{bt_mdd:.2%}")
-
-fig_bt, ax_bt = plt.subplots()
-ax_bt.plot(eq.index, eq.values)
-ax_bt.set_title("Backtest Equity (Monthly Rebalance)")
-fig_bt.tight_layout()
-st.pyplot(fig_bt)
+    # Outperformance (Portfolio / Benchmark)
+    outperf = (port_eq / bench_eq) - 1.0
+    st.write(f"Outperformance vs {bench_ticker} (letzter Stand): {float(outperf.iloc[-1]):.2%}")
 
 # -------------------- Backtest: Benchmark & Interactive Chart --------------------
 import plotly.graph_objs as go
