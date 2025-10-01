@@ -4,9 +4,5 @@ numpy==1.26.4
 scipy==1.11.4
 yfinance==0.2.43
 plotly==5.24.1
+PyYAML==6.0.2
 PyPortfolioOpt==1.5.5
-PyYAML==6.0.1
-cvxpy==1.4.3
-ecos==2.0.12
-osqp==0.6.5
-scs==3.2.4
