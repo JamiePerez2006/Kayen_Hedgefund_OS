@@ -390,7 +390,7 @@ with tab_backtest:
     c4.metric("Backtest MaxDD", f"{bt_mdd:.2%}")
 
     outperf = (port_eq.iloc[-1]/bench_eq.iloc[-1]) - 1.0
-    st.write(f"Outperformance vs {bench_ticker}: **{outperf:.2%}**")
+    st.write(f"Outperformance vs {bench_ticker}: **{outp:.2%}**")
 
 # ---------- Factors (simple regression vs macro proxies) ----------
 with tab_factors:
