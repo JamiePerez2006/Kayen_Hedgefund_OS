@@ -15,7 +15,6 @@ import streamlit as st
 import plotly.io as pio
 import plotly.graph_objs as go
 
-
 # ---------------- Page & Premium Styling ----------------
 st.set_page_config(page_title="MAXI Hedgefund — Pro", layout="wide")
 
@@ -26,8 +25,9 @@ pio.templates["kayen"] = go.layout.Template(
         paper_bgcolor="#0e1117",
         plot_bgcolor="#0e1117",
         colorway=["#22d3ee", "#14b8a6", "#f59e0b", "#f43f5e", "#a78bfa"],
-        xaxis=dict(gridcolor="rgba(255,255,255,0.1)"),
-        yaxis=dict(gridcolor="rgba(255,255,255,0.1)"),
+        xaxis=dict(gridcolor="rgba(255,255,255,0.08)"),
+        yaxis=dict(gridcolor="rgba(255,255,255,0.08)"),
+        legend=dict(bgcolor="rgba(0,0,0,0)")
     )
 )
 pio.templates.default = "kayen"
@@ -193,7 +193,7 @@ if crypto_cap > 0.0 and len(weights):
     crypto_names = ("BTC","ETH","SOL","DOGE","ADA")
     ca = [t for t in weights.index if any(sym in t for sym in crypto_names)]
     cs = float(weights.reindex(ca).fillna(0.0).sum()) if ca else 0.0
-    if cs > crypto_cap:
+    if cs > crypto_cap and cs > 0:
         scale = crypto_cap / cs
         weights.loc[ca] = weights.loc[ca] * scale
         non_ca = [t for t in weights.index if t not in ca]
@@ -203,7 +203,7 @@ if crypto_cap > 0.0 and len(weights):
             if denom <= 0:
                 weights.loc[non_ca] += rem / len(non_ca)
             else:
-                weights.loc[non_ca] += rem * (weights.loc[non_ca] / denom)
+                weights.loc[non_ca] += rem * (weights.loc[non_ca] / max(denom, 1e-12))
 
 # Portfolio Stats (current target)
 port = rets.dot(weights.values)
@@ -218,10 +218,8 @@ roll_sharpe = port.rolling(60).apply(lambda x: (x.mean()/x.std())*np.sqrt(252) i
 roll_cum = (1+port).cumprod()
 roll_dd = (roll_cum/roll_cum.cummax() - 1.0)
 
-
 # ---------------- Tabs ----------------
 tab_overview, tab_risk, tab_backtest, tab_trades = st.tabs(["Overview", "Risk", "Backtest", "Trades"])
-
 
 # ---------------- Overview ----------------
 def kpi_card(label:str, value:str, delta:str|None=None):
@@ -267,7 +265,6 @@ with tab_overview:
         }).round(4)
         st.dataframe(df_risk, use_container_width=True)
 
-
 # ---------------- Risk ----------------
 with tab_risk:
     st.subheader("Correlation Heatmap")
@@ -303,13 +300,11 @@ with tab_risk:
     if c_sum > crypto_cap: alerts.append(f"Crypto exposure {c_sum:.1%} exceeds cap {crypto_cap:.0%}.")
     if not roll_sharpe.dropna().empty and roll_sharpe.iloc[-1] < 1.0: alerts.append("Sharpe < 1.0 (60d).")
     if not dd.dropna().empty and dd.iloc[-1] < -0.15: alerts.append("Drawdown breached -15%.")
-
     st.markdown("<hr/>", unsafe_allow_html=True)
     if alerts:
         for a in alerts: st.warning(a)
     else:
         st.success("✅ No alerts.")
-
 
 # ---------------- Backtest (Monthly Rebalance) ----------------
 @st.cache_data(show_spinner=False, ttl=300)
@@ -319,6 +314,7 @@ def load_prices_bt(tickers, years):
 def rebalance_backtest(px, rets, dates, min_w, max_w, crypto_cap, cost_bps):
     """
     px: Preise DF | rets: Returns DF | dates: Rebalance-Daten (DatetimeIndex)
+    Robust gegen fehlende Solver/Shapes.
     """
     w = None
     last_w = None
@@ -332,7 +328,6 @@ def rebalance_backtest(px, rets, dates, min_w, max_w, crypto_cap, cost_bps):
                 w_new = pd.Series(1.0/len(px.columns), index=px.columns, dtype=float)
             else:
                 tmp = try_min_vol_weights(px_hist, min_w=min_w, max_w=max_w)
-                # robustes Unpacking (kann (weights, used) liefern)
                 w_new = tmp[0] if isinstance(tmp, (tuple, list)) else tmp
 
             # w_new robust in Series + Ausrichtung
@@ -368,7 +363,7 @@ def rebalance_backtest(px, rets, dates, min_w, max_w, crypto_cap, cost_bps):
                         if denom <= 0:
                             w_new.loc[nc] += rem / len(nc)
                         else:
-                            w_new.loc[nc] += rem * (w_new.loc[nc] / denom)
+                            w_new.loc[nc] += rem * (w_new.loc[nc] / max(denom, 1e-12))
 
             # Kosten auf Turnover
             if last_w is not None:
@@ -390,7 +385,6 @@ def rebalance_backtest(px, rets, dates, min_w, max_w, crypto_cap, cost_bps):
 
 with tab_backtest:
     st.subheader("Backtest · Performance vs Benchmark")
-
     bt_years = st.slider("Backtest years", 2, 10, years, key="bt_years")
     cost_bps = st.number_input("Transaction cost (bps per turnover)", 0, 200, 10, step=5, key="bt_cost_bps")
 
@@ -412,7 +406,7 @@ with tab_backtest:
     bt_cagr = (eq.iloc[-1] ** (252/n)) - 1 if len(eq) else 0.0
     bt_vol  = bt_ret.std() * np.sqrt(252) if len(bt_ret) else 0.0
     bt_sha  = (bt_ret.mean()/bt_ret.std()) * np.sqrt(252) if len(bt_ret) and bt_ret.std()!=0 else 0.0
-    bt_mdd  = (eq/eq.cummax() - 1.0).min() if len(eq) else 0.0
+    bt_mdd  = float((eq/eq.cummax() - 1.0).min()) if len(eq) else 0.0
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Backtest CAGR", f"{bt_cagr:.2%}")
@@ -425,7 +419,8 @@ with tab_backtest:
 
     @st.cache_data(show_spinner=False, ttl=300)
     def load_bench(ticker, years):
-        return yf.download(ticker, period=f"{years}y", auto_adjust=True, progress=False)["Close"].dropna()
+        s = yf.download(ticker, period=f"{years}y", auto_adjust=True, progress=False)["Close"].dropna()
+        return s
 
     bench_px = load_bench(bench_ticker, bt_years)
 
@@ -445,7 +440,6 @@ with tab_backtest:
 
         outp = (port_eq/bench_eq) - 1.0
         st.write(f"Outperformance vs {bench_ticker}: {float(outp.iloc[-1]):.2%}")
-
 
 # ---------------- Trades / Rebalance Planner ----------------
 with tab_trades:
