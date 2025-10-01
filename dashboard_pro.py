@@ -275,39 +275,34 @@ with tab_backtest:
 
     # --- Backtest-Funktion: monatliche Rebalance, Kosten auf Turnover ---
 def rebalance_backtest(px, rets, dates, min_w, max_w, crypto_cap, cost_bps):
-    """
-    px: Preise (DataFrame)
-    rets: Returns (DataFrame)
-    dates: Rebalance-Daten (DatetimeIndex)
-    """
-    w = None            # Gewichte
-    last_w = None       # Letzte Gewichte
-    eq = []             # Equity-Kurve
-    equity = 1.0        # Startwert
+    w = None
+    last_w = None
+    eq = []
+    equity = 1.0
 
     for dt in rets.index:
-        # Rebalance an Stichtagen
+        # an Rebalance-Tagen neue Gewichte bestimmen
         if dt in dates:
             px_hist = px.loc[:dt].dropna()
             w_new = try_min_vol_weights(px_hist, min_w=min_w, max_w=max_w)
 
             # Crypto-Kappung
             if crypto_cap > 0:
-                ca = [t for t in w_new.index if any(sym in t for sym in ["BTC", "ETH", "SOL", "DOGE", "ADA"])]
+                ca = [t for t in w_new.index if any(sym in t for sym in ("BTC", "ETH", "SOL", "DOGE", "ADA"))]
                 cs = float(w_new.reindex(ca).fillna(0.0).sum()) if ca else 0.0
                 if cs > crypto_cap:
                     scale = crypto_cap / cs if cs > 0 else 0.0
-                    w_new.loc[ca] *= scale
+                    w_new.loc[ca] = w_new.loc[ca] * scale
                     nc = [t for t in w_new.index if t not in ca]
                     if nc:
-                        w_new.loc[nc] *= (1.0 - w_new.loc[ca].sum()) / w_new.loc[nc].sum()
+                        w_new.loc[nc] = w_new.loc[nc] * ((1.0 - w_new.loc[ca].sum()) / w_new.loc[nc].sum())
 
-            # Transaktionskosten auf Turnover
+            # Transaktionskosten auf Turnover (bps)
             if last_w is not None:
                 turnover = float((w_new - last_w).abs().sum())
-                equity *= (1.0 - (cost_bps / 10000.0) * turnover)
+                equity = equity * (1.0 - (cost_bps / 10000.0) * turnover)
 
-            # Neue Gewichte übernehmen
+            # Gewichte übernehmen
             w = w_new
             last_w = w_new.copy()
 
@@ -317,11 +312,10 @@ def rebalance_backtest(px, rets, dates, min_w, max_w, crypto_cap, cost_bps):
 
         # Tages-Return mit aktuellen Gewichten
         r = float(rets.loc[dt].reindex(w.index).fillna(0.0).dot(w))
-        equity *= (1.0 + r)
+        equity = equity * (1.0 + r)
         eq.append(equity)
 
     return pd.Series(eq, index=rets.index, name="Portfolio")
-    
 
 # Backtest laufen lassen
 eq = rebalance_backtest(
