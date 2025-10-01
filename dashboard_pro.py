@@ -346,6 +346,20 @@ def rebalance_backtest(px, rets, dates, min_w, max_w, cost_bps):
     outperf = (port_eq / bench_eq) - 1.0
     st.write(f"Outperformance vs {bench_ticker} (letzter Stand): {float(outperf.iloc[-1]):.2%}")
 # ----------------------- Backtest: Benchmark & Interactive Chart -----------------------
+# --- Benchmark: sicherstellen, dass wir eine Equity-Kurve und den Index haben ---
+try:
+    eq_index = eq.index           # falls eq schon existiert (z. B. im gleichen Tab)
+except NameError:
+    # eq existiert hier noch nicht -> lokal berechnen
+    eq = rebalance_backtest(
+        rets_bt,
+        rebal_dates,
+        min_w=min_w, max_w=max_w,
+        crypto_cap=crypto_cap,
+        cost_bps=cost_bps
+    )
+    eq_index = eq.index
+
 import plotly.graph_objs as go
 
 # Benchmark-Auswahl
