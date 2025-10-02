@@ -1,14 +1,14 @@
 # ==========================================================
 # ALLADDIN 2.0 — MAXI HEDGEFUND (Single-file Streamlit App)
 # Premium Look • Multi-Optimizer • Walk-Forward BT • EWMA/Regime
-# Stress • Monte-Carlo • Rebalance Planner • Presets • Reports
+# Target-Vol+Leverage • Momentum Tilt • Stress/Monte-Carlo
+# Rebalance Planner • Presets • Reports • KI-Insights
 # ==========================================================
 
 import io
 import os
 import json
 import math
-import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple
 
@@ -35,27 +35,58 @@ pio.templates["alladdin"] = go.layout.Template(
     )
 )
 pio.templates.default = "alladdin"
+PLOTLY_CFG = {"toImageButtonOptions": {"format":"png","filename":"alladdin_chart","height":450,"width":900,"scale":2}}
 
 CUSTOM_CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
 html, body, [class*="css"] { font-family: 'Inter', system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+
+/* Background: dark stage + soft radials + subtle grid */
+body {
+  background:
+    radial-gradient(1200px 600px at 10% -10%, rgba(34,211,238,.08), transparent 60%),
+    radial-gradient(1200px 600px at 110% 10%, rgba(167,139,250,.06), transparent 60%),
+    radial-gradient(1200px 600px at 50% 120%, rgba(20,184,166,.08), transparent 60%),
+    linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01)),
+    #0e1117;
+}
+:root { --grid-color: rgba(255,255,255,0.04); }
+.background-grid:before {
+  content:"";
+  position: fixed; inset: 0; pointer-events: none;
+  background-image:
+    linear-gradient(var(--grid-color) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-color) 1px, transparent 1px);
+  background-size: 36px 36px, 36px 36px;
+  mask-image: radial-gradient(circle at 50% 40%, rgba(255,255,255,.35), transparent 55%);
+}
+
 .block-container { padding-top: 0.8rem; padding-bottom: 1.2rem; }
 h1,h2,h3 { letter-spacing:.2px; }
-.kpi-card { background:rgba(22,26,35,.85); border:1px solid rgba(255,255,255,.06);
-  border-radius:14px; padding:16px 18px; box-shadow:0 10px 28px rgba(0,0,0,.28); }
+
+/* KPI cards */
+.kpi-card {
+  background:rgba(22,26,35,.85); border:1px solid rgba(255,255,255,.08);
+  border-radius:14px; padding:16px 18px; box-shadow:0 10px 28px rgba(0,0,0,.28);
+}
 .kpi-big { font-size:2.0rem; font-weight:800; color:#ecfeff; line-height:1.1; }
 .kpi-label { color:#9ca3af; font-size:.92rem; }
 hr { border:none; height:1px; background:linear-gradient(90deg,transparent,rgba(255,255,255,.10),transparent); margin:10px 0 18px; }
 .smallnote { color:#9ca3af; font-size:.9rem; }
+
+/* Tables & Buttons */
 .stDataFrame { border:1px solid rgba(255,255,255,.06); border-radius:12px; overflow:hidden; }
 .stButton>button { border-radius:10px; }
-.stTabs [data-baseweb="tab-list"] { gap: 6px; }
+
+/* Tabs: sticky */
+.stTabs [data-baseweb="tab-list"] { gap: 6px; position: sticky; top: 0; z-index: 10; }
 .stTabs [data-baseweb="tab"] { background: rgba(255,255,255,.06); border-radius: 10px; padding: 8px 12px; }
 .stTabs [aria-selected="true"] { background: rgba(34,211,238,.14); border:1px solid rgba(34,211,238,.35); }
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+st.markdown('<div class="background-grid"></div>', unsafe_allow_html=True)
 
 # ---------- Constants ----------
 CRYPTO_KEYS = ("BTC", "ETH", "SOL", "DOGE", "ADA")
@@ -108,7 +139,13 @@ def regime_tag(returns: pd.DataFrame, lookback: int = 21, thr: float = 0.02) -> 
     vol = returns.rolling(lookback).std().dropna().iloc[-1].mean()
     return "high-vol" if vol > thr else "normal"
 
-# ---------- Data: robust loader with cache & light winsorize ----------
+def sparkline(series: pd.Series, height=60):
+    fig = go.Figure(go.Scatter(x=series.index, y=series.values, mode="lines"))
+    fig.update_layout(margin=dict(l=0,r=0,t=0,b=0), height=height, template="alladdin")
+    fig.update_xaxes(visible=False); fig.update_yaxes(visible=False)
+    return fig
+
+# ---------- Data: robust loader with light winsorize ----------
 @st.cache_data(show_spinner=False, ttl=300)
 def load_prices(tickers: List[str], years: int = 5) -> pd.DataFrame:
     start = (datetime.today() - timedelta(days=365*years)).strftime("%Y-%m-%d")
@@ -123,9 +160,9 @@ def load_prices(tickers: List[str], years: int = 5) -> pd.DataFrame:
         px = df if isinstance(df, pd.DataFrame) else df.to_frame()
     if isinstance(px, pd.Series):
         px = px.to_frame()
-    # Keep requested columns order
     px = px.reindex(columns=[t for t in tickers if t in px.columns])
-    # Light outlier fix on extreme single-day % moves > 40%
+
+    # Soft outlier fix on extreme single-day % moves > 40%
     pct = px.pct_change()
     bad = pct.abs() > 0.40
     if bad.any().any():
@@ -134,9 +171,10 @@ def load_prices(tickers: List[str], years: int = 5) -> pd.DataFrame:
             idx = bad[col][bad[col]].index
             for t in idx:
                 prev = px[col].shift(1).get(t, np.nan)
-                nxt = px[col].shift(-1).get(t, np.nan)
+                nxt  = px[col].shift(-1).get(t, np.nan)
                 rep = np.nanmean([prev, nxt])
                 if not np.isnan(rep): px.at[t, col] = rep
+
     return px.dropna(how="all")
 
 # ---------- Optimizers ----------
@@ -163,7 +201,6 @@ def inverse_variance_weights(px_hist: pd.DataFrame, lb: float, ub: float) -> pd.
     return pd.Series(w, index=px_hist.columns, dtype=float)
 
 def optimizer_min_vol(px_hist: pd.DataFrame, lb: float, ub: float, use_ewma: bool) -> Tuple[pd.Series, str]:
-    # Try PyPortfolioOpt; fall back to inverse-variance
     try:
         from pypfopt.expected_returns import mean_historical_return
         from pypfopt.efficient_frontier import EfficientFrontier
@@ -191,14 +228,12 @@ def optimizer_hrp(px_hist: pd.DataFrame, lb: float, ub: float) -> Tuple[pd.Serie
         w.index = pd.Index(w.index, dtype=str)
         w = w.fillna(0.0)
         if abs(float(w.sum()) - 1.0) > 1e-9: w = w / w.sum()
-        # Enforce simple caps post-hoc
         w = pd.Series(_project_to_simplex_with_bounds(w.values, lb, ub), index=w.index)
         return w, "HRP"
     except Exception:
         return inverse_variance_weights(px_hist, lb, ub), "Inverse-Variance"
 
 def optimizer_cvar(returns: pd.DataFrame, alpha: float, lb: float, ub: float, allow_short: bool) -> Tuple[pd.Series, str]:
-    # Minimize CVaR with cvxpy; fallback to inverse-variance
     try:
         import cvxpy as cp
         R = returns.values  # T x N
@@ -219,7 +254,6 @@ def optimizer_cvar(returns: pd.DataFrame, alpha: float, lb: float, ub: float, al
         prob = cp.Problem(cp.Minimize(obj), cons)
         prob.solve(solver=cp.ECOS, verbose=False, warm_start=True)
         w_opt = pd.Series(np.array(w.value).ravel(), index=returns.columns).fillna(0.0)
-        # Cap & renorm
         w_opt = pd.Series(_project_to_simplex_with_bounds(w_opt.values, lb, ub), index=w_opt.index)
         return w_opt, "Min-CVaR"
     except Exception:
@@ -241,10 +275,16 @@ def apply_crypto_cap(weights: pd.Series, crypto_cap: float) -> pd.Series:
         if w.sum() > 0: w = w / w.sum()
     return w
 
-# ---------- UI: Sidebar ----------
-st.title("ALLADDIN 2.0 — MAXI HEDGEFUND")
-st.caption(datetime.now().strftime("%d.%m.%Y %H:%M"))
+# ---------- UI: Hero Header ----------
+colH1, colH2 = st.columns([0.8, 0.2])
+with colH1:
+    st.title("ALLADDIN 2.0 — MAXI HEDGEFUND")
+    st.caption(datetime.now().strftime("%d.%m.%Y %H:%M"))
+with colH2:
+    try: st.image("assets/logo.png")
+    except: pass
 
+# ---------- Sidebar ----------
 st.sidebar.header("Settings")
 colA, colB = st.sidebar.columns([1,1])
 with colA:
@@ -263,15 +303,24 @@ alpha = st.sidebar.slider("Risk alpha (VaR/CVaR)", 0.90, 0.99, value=0.95, step=
 allow_short = st.sidebar.checkbox("Allow short (experimental)", value=False)
 portfolio_value = st.sidebar.number_input("Portfolio value (EUR)", min_value=1000.0, value=100000.0, step=1000.0, format="%.2f")
 
+# --- Target-Vol + Leverage ---
+target_vol = st.sidebar.slider("Target annualized vol", 0.05, 0.40, 0.12, step=0.01)
+max_leverage = st.sidebar.slider("Max gross leverage", 1.0, 3.0, 1.5, step=0.1)
+
+# --- Momentum Tilt ---
+mom_strength = st.sidebar.slider("Momentum tilt strength", 0.0, 1.0, 0.30, step=0.05)
+mom_lb = st.sidebar.selectbox("Momentum lookback", ["6M","9M","12M"], index=2)
+
 # Optimizer choice
 opt_choice = st.sidebar.selectbox("Optimizer", ["Min-Vol", "HRP", "Min-CVaR (tail risk)"], index=0)
 use_ewma = st.sidebar.checkbox("Use EWMA cov in high-vol regime (auto)", value=True)
+
 # Walk-forward settings
 wf_reb = st.sidebar.selectbox("Backtest rebalance", ["Monthly","Weekly"], index=0)
 wf_cost_bps = st.sidebar.number_input("Transaction cost (bps per turnover)", 0, 200, value=10, step=5)
 wf_turnover_cap = st.sidebar.slider("Turnover cap per rebalance", 0.05, 1.0, value=0.35, step=0.05)
 
-# Presets: save/load
+# Presets: save/load + gallery
 st.sidebar.markdown("**Presets**")
 if st.sidebar.button("Save current preset"):
     preset = {
@@ -279,7 +328,8 @@ if st.sidebar.button("Save current preset"):
         "crypto_cap": crypto_cap, "alpha": alpha, "allow_short": allow_short,
         "portfolio_value": portfolio_value, "opt_choice": opt_choice,
         "use_ewma": use_ewma, "wf_reb": wf_reb, "wf_cost_bps": wf_cost_bps,
-        "wf_turnover_cap": wf_turnover_cap
+        "wf_turnover_cap": wf_turnover_cap, "target_vol": target_vol,
+        "max_leverage": max_leverage, "mom_strength": mom_strength, "mom_lb": mom_lb
     }
     st.sidebar.download_button("Download preset.json", data=json.dumps(preset, indent=2).encode(),
                                file_name="preset.json", mime="application/json")
@@ -292,11 +342,19 @@ if uploaded:
     except Exception as e:
         st.sidebar.error(f"Preset error: {e}")
 
+st.sidebar.markdown("**Preset Gallery**")
+if st.sidebar.button("💎 Crypto-Only"):
+    st.session_state["tickers"] = ["BTC-USD","ETH-USD","SOL-USD","ADA-USD"]
+if st.sidebar.button("🟢 60/40 Core"):
+    st.session_state["tickers"] = ["SPY","TLT","GLD","IEF"]
+if st.sidebar.button("⚖️ Risk-Parity Core"):
+    st.session_state["tickers"] = ["SPY","TLT","IEF","GLD","UUP"]
+
+# ---------- Data ----------
 if len(tickers) == 0:
     st.warning("Bitte mindestens einen Ticker wählen.")
     st.stop()
 
-# ---------- Data ----------
 try:
     px = load_prices(tickers, years=years)
     if px.empty:
@@ -306,6 +364,13 @@ try:
 except Exception as e:
     st.error(f"Datenfehler: {e}")
     st.stop()
+
+# Data Quality quick checks
+dq_missing = float(px.isna().mean().mean())
+dq_min_hist = int(px.notna().sum().min())
+dq_last = px.index.max()
+if dq_missing > 0.02 or dq_min_hist < 250:
+    st.warning(f"Data Quality: missing={dq_missing:.1%}, min_history={dq_min_hist} Tage. Latest={getattr(dq_last,'date',lambda: dq_last)()}")
 
 # ---------- Optimize (target) ----------
 regime = regime_tag(rets)
@@ -322,19 +387,38 @@ w_opt = w_opt.reindex(px.columns).fillna(0.0)
 w_opt = apply_crypto_cap(w_opt, crypto_cap)
 if w_opt.sum() > 0: w_opt = w_opt / w_opt.sum()
 
-# ---------- Portfolio series & risk ----------
+# Momentum Tilt (alpha layer)
+lb_map = {"6M":126, "9M":189, "12M":252}
+lb = lb_map[mom_lb]
+mom = (px/px.shift(lb) - 1.0).iloc[-1].reindex(w_opt.index).fillna(0.0)
+mom_score = (mom.rank(pct=True) - 0.5)  # centered
+w_tilt = w_opt * (1 + mom_strength * mom_score)
+if w_tilt.sum() > 0: w_opt = (w_tilt / w_tilt.sum()).fillna(0.0)
+
+# ---------- Portfolio series & risk (pre- and post-scale) ----------
 port = (rets.fillna(0.0) @ w_opt.values).rename("Portfolio")
 cum  = (1.0 + port).cumprod()
 ann_ret, ann_vol = annualize_stats(port)
 sr = sharpe_ratio(port)
 VaR, ES = hist_var_es(port, alpha=alpha)
 MDD = max_drawdown(cum)
-roll_sharpe = port.rolling(60).apply(lambda x: 0.0 if np.std(x)==0 else (np.mean(x)/np.std(x))*np.sqrt(252), raw=True)
-roll_dd = (cum/cum.cummax()-1.0)
+
+# Risk targeting (live series scaled)
+eps = 1e-8
+scale_live = min(max_leverage, (target_vol / max(eps, ann_vol)))
+port_eff = port * scale_live
+cum_eff  = (1.0 + port_eff).cumprod()
+ann_ret_eff, ann_vol_eff = annualize_stats(port_eff)
+sr_eff = sharpe_ratio(port_eff)
+VaR_eff, ES_eff = hist_var_es(port_eff, alpha=alpha)
+MDD_eff = max_drawdown(cum_eff)
+
+roll_sharpe = port_eff.rolling(60).apply(lambda x: 0.0 if np.std(x)==0 else (np.mean(x)/np.std(x))*np.sqrt(252), raw=True)
+roll_dd = (cum_eff/cum_eff.cummax()-1.0)
 
 # ---------- Tabs ----------
-tab_overview, tab_risk, tab_backtest, tab_factors, tab_stress, tab_trades, tab_report = st.tabs(
-    ["Overview", "Risk", "Backtest", "Factors", "Stress", "Trades", "Report"]
+tab_overview, tab_risk, tab_backtest, tab_factors, tab_stress, tab_trades, tab_ai, tab_report = st.tabs(
+    ["Overview", "Risk", "Backtest", "Factors", "Stress", "Trades", "AI Insights", "Report"]
 )
 
 # ---------- Overview ----------
@@ -348,11 +432,18 @@ def kpi(label, value):
 
 with tab_overview:
     a,b,c,d = st.columns(4)
-    with a: kpi("Portfolio Index", f"{cum.iloc[-1]:.2f}x")
-    with b: kpi("Sharpe", f"{sr:.2f}")
-    with c: kpi(f"VaR({int(alpha*100)}%) 1d", f"{VaR:.2%}")
-    with d: kpi("Max Drawdown", f"{MDD:.2%}")
-    st.caption(f"Optimizer: {opt_label} · Crypto Cap: {crypto_cap:.0%} · Regime: {regime}")
+    with a: kpi("Portfolio Index", f"{cum_eff.iloc[-1]:.2f}x")
+    with b: kpi("Sharpe (post-scale)", f"{sr_eff:.2f}")
+    with c: kpi(f"VaR({int(alpha*100)}%) 1d", f"{VaR_eff:.2%}")
+    with d: kpi("Max Drawdown", f"{MDD_eff:.2%}")
+    st.caption(f"Optimizer: {opt_label} · Crypto Cap: {crypto_cap:.0%} · Regime: {regime} · Leverage: {scale_live:.2f}×")
+
+    # KPI sparklines
+    sa, sb, sc, sd = st.columns(4)
+    with sa: st.plotly_chart(sparkline((1+port_eff).cumprod().pct_change().fillna(0).rolling(20).mean()), use_container_width=True, config={"displayModeBar": False})
+    with sb: st.plotly_chart(sparkline(roll_sharpe.fillna(0)), use_container_width=True, config={"displayModeBar": False})
+    with sc: st.plotly_chart(sparkline((cum_eff/cum_eff.cummax()-1).fillna(0)), use_container_width=True, config={"displayModeBar": False})
+    with sd: st.plotly_chart(sparkline(rets.mean(axis=1).rolling(20).mean().fillna(0)), use_container_width=True, config={"displayModeBar": False})
 
     L, R = st.columns([1.25, 1.0])
     with L:
@@ -361,14 +452,15 @@ with tab_overview:
         df_over = pd.DataFrame({"Weight": w_opt.round(4), "YTD Return": pd.Series(ytd).round(4)})
         st.dataframe(df_over, use_container_width=True)
     with R:
-        st.subheader("Risk Metrics")
+        st.subheader("Risk Metrics (post-scale)")
         df_risk = pd.DataFrame({
-            "Annualized Return": [ann_ret],
-            "Annualized Volatility": [ann_vol],
-            "Sharpe": [sr],
-            f"VaR({int(alpha*100)}%)": [VaR],
-            f"CVaR({int(alpha*100)}%) (approx)": [ES],
-            "Max Drawdown": [MDD],
+            "Annualized Return": [ann_ret_eff],
+            "Annualized Volatility": [ann_vol_eff],
+            "Sharpe": [sr_eff],
+            f"VaR({int(alpha*100)}%)": [VaR_eff],
+            f"CVaR({int(alpha*100)}%) (approx)": [ES_eff],
+            "Max Drawdown": [MDD_eff],
+            "Leverage (×)": [scale_live],
         }).round(4)
         st.dataframe(df_risk, use_container_width=True)
 
@@ -384,31 +476,31 @@ with tab_overview:
 
 # ---------- Risk ----------
 with tab_risk:
-    st.subheader("Drawdown & Rolling Sharpe")
+    st.subheader("Drawdown & Rolling Sharpe (post-scale)")
     fig1 = go.Figure()
-    dd = (cum/cum.cummax()-1.0)
+    dd = (cum_eff/cum_eff.cummax()-1.0)
     fig1.add_trace(go.Scatter(x=dd.index, y=dd.values, name="Drawdown", mode="lines"))
     fig1.update_yaxes(tickformat=".0%")
-    st.plotly_chart(fig1, use_container_width=True)
+    st.plotly_chart(fig1, use_container_width=True, config=PLOTLY_CFG)
 
     fig2 = go.Figure()
     fig2.add_trace(go.Scatter(x=roll_sharpe.index, y=roll_sharpe.values, name="Rolling Sharpe (60d)", mode="lines"))
-    st.plotly_chart(fig2, use_container_width=True)
+    st.plotly_chart(fig2, use_container_width=True, config=PLOTLY_CFG)
 
-    st.subheader("Monte Carlo VaR/ES (1d)")
+    st.subheader("Monte Carlo VaR/ES (1d, post-scale)")
     sims = st.slider("Simulations", 1000, 20000, 5000, step=1000)
     mu_vec = rets.mean().values
     cov = rets.cov().values
     try:
         rnd = np.random.multivariate_normal(mu_vec, cov, size=sims)
-        port_sims = rnd @ w_opt.values
+        port_sims = (rnd @ w_opt.values) * scale_live
         VaR_mc = np.percentile(port_sims, (1-alpha)*100)
         ES_mc  = port_sims[port_sims<=VaR_mc].mean() if np.any(port_sims<=VaR_mc) else VaR_mc
         st.write(f"Monte Carlo VaR: **{VaR_mc:.2%}**,  ES: **{ES_mc:.2%}**")
     except Exception as e:
         st.warning(f"Monte Carlo nicht verfügbar: {e}")
 
-# ---------- Backtest (Walk-Forward) ----------
+# ---------- Backtest (Walk-Forward, with risk targeting) ----------
 def monthly_dates(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
     g = pd.Series(index=index, data=True)
     return g.groupby([index.year, index.month]).head(1).index
@@ -419,7 +511,9 @@ def weekly_dates(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
 
 def rebalance_backtest(px: pd.DataFrame, rets: pd.DataFrame, dates: pd.DatetimeIndex,
                        lb: float, ub: float, crypto_cap: float, cost_bps: float,
-                       turnover_cap: float, opt_choice: str, use_ewma: bool, alpha: float, allow_short: bool) -> pd.Series:
+                       turnover_cap: float, opt_choice: str, use_ewma: bool,
+                       alpha: float, allow_short: bool,
+                       target_vol: float, max_leverage: float) -> pd.Series:
     w_prev = None
     eq = []
     equity = 1.0
@@ -432,20 +526,27 @@ def rebalance_backtest(px: pd.DataFrame, rets: pd.DataFrame, dates: pd.DatetimeI
                 w = optimizer_hrp(px_hist, lb, ub)[0]
             else:
                 w = optimizer_cvar(rets.loc[:dt].dropna(), alpha, lb, ub, allow_short)[0]
-
             w = apply_crypto_cap(w, crypto_cap)
             if w.sum() > 0: w = w / w.sum()
 
+            # Turnover & costs
             if w_prev is not None:
                 delta = (w - w_prev).abs().sum()
                 if delta > turnover_cap:
                     w = w_prev + (w - w_prev) * (turnover_cap / delta)
                 equity *= (1.0 - (cost_bps/10000.0) * delta)
             w_prev = w.copy()
+
         if w_prev is None:
             w_prev = pd.Series(1.0/len(rets.columns), index=rets.columns, dtype=float)
+
+        # Risk targeting using rolling 63d vol
+        hist = rets.loc[:dt].tail(63).reindex(columns=w_prev.index).dot(w_prev.values)
+        curr_vol = hist.std() * np.sqrt(252) if len(hist) else 0.0
+        sf = min(max_leverage, (target_vol / max(1e-8, curr_vol))) if curr_vol > 0 else 1.0
+
         r = float(rets.loc[dt].reindex(w_prev.index).fillna(0.0).dot(w_prev.values))
-        equity *= (1.0 + r)
+        equity *= (1.0 + sf * r)
         eq.append(equity)
     return pd.Series(eq, index=rets.index, name="Portfolio")
 
@@ -458,7 +559,8 @@ with tab_backtest:
     rebal_dates = monthly_dates(rets_bt.index) if wf_reb == "Monthly" else weekly_dates(rets_bt.index)
     eq = rebalance_backtest(px_bt, rets_bt, rebal_dates, lb=min_w, ub=max_w, crypto_cap=crypto_cap,
                             cost_bps=wf_cost_bps, turnover_cap=wf_turnover_cap,
-                            opt_choice=opt_choice, use_ewma=use_ewma_now, alpha=alpha, allow_short=allow_short)
+                            opt_choice=opt_choice, use_ewma=use_ewma_now, alpha=alpha, allow_short=allow_short,
+                            target_vol=target_vol, max_leverage=max_leverage)
 
     bench_ticker = st.selectbox("Benchmark", ["SPY","ACWI","QQQ","IEF","GLD"], index=0, key="bench")
     bench_px = yf.download(bench_ticker, period=f"{bt_years}y", auto_adjust=True, progress=False)["Close"].dropna()
@@ -469,8 +571,8 @@ with tab_backtest:
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=common, y=port_eq.values,  name="Portfolio", mode="lines"))
     fig.add_trace(go.Scatter(x=common, y=bench_eq.values, name=bench_ticker, mode="lines"))
-    fig.update_layout(title="Index (Start=1.0)", xaxis_title="Date", yaxis_title="Index", height=420)
-    st.plotly_chart(fig, use_container_width=True)
+    fig.update_layout(title="Index (Start=1.0)", xaxis_title="Date", yaxis_title="Index", height=420, template="alladdin")
+    st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CFG)
 
     bt_ret = eq.pct_change().dropna()
     n = len(bt_ret) if len(bt_ret) else 1
@@ -504,7 +606,8 @@ with tab_factors:
     fac_px = load_prices(fac_tickers, years=min(years, 5))
     fac_rets = to_returns(fac_px)
 
-    y = port.reindex(fac_rets.index).dropna()
+    y = port_eff := port * scale_live
+    y = y.reindex(fac_rets.index).dropna()
     X = fac_rets.reindex(y.index).fillna(0.0).copy()
     X.columns = list(factor_map.keys())
 
@@ -534,7 +637,7 @@ with tab_factors:
 # ---------- Stress Testing ----------
 with tab_stress:
     st.subheader("Instant Stress Test")
-    st.caption("Simuliere einen 1-Tages-Schock auf Assets und sieh die unmittelbare P&L-Wirkung.")
+    st.caption("Simuliere einen 1-Tages-Schock (post-scale Returns wirken proportional).")
     scenario_lib = {
         "Tech+Crypto Crash": {"AAPL": -0.15, "MSFT": -0.15, "SPY": -0.12, "BTC-USD": -0.25, "ETH-USD": -0.35},
         "Rates Spike": {"TLT": -0.08, "SPY": -0.04},
@@ -550,15 +653,15 @@ with tab_stress:
             shock = pd.Series(0.0, index=px.columns, dtype=float)
             for k,v in scenario_lib[scn].items():
                 if k in shock.index: shock.loc[k] = v
-            pnl = float((w_opt * shock).sum())
-            st.success(f"[{scn}] Estimated instant P&L: **{pnl:.2%}**")
+            pnl = float((w_opt * shock).sum()) * scale_live
+            st.success(f"[{scn}] Estimated instant P&L (post-scale): **{pnl:.2%}**")
     with right:
         if st.button("Apply Manual Shock"):
             shock = pd.Series(0.0, index=px.columns, dtype=float)
             for k in pick:
                 shock.loc[k] = shock_pct / 100.0
-            pnl = float((w_opt * shock).sum())
-            st.info(f"Manual shock P&L: **{pnl:.2%}**")
+            pnl = float((w_opt * shock).sum()) * scale_live
+            st.info(f"Manual shock P&L (post-scale): **{pnl:.2%}**")
 
 # ---------- Trades / Rebalance Planner ----------
 with tab_trades:
@@ -587,6 +690,49 @@ with tab_trades:
     st.download_button("Download Rebalance Plan (CSV)", data=buf.getvalue(),
                        file_name="rebalance_plan.csv", mime="text/csv")
 
+# ---------- AI Insights (lightweight KI-Layer) ----------
+with tab_ai:
+    st.subheader("AI Insights (Explain & Suggest)")
+    # Simple rule-based narrative + optional sklearn clustering
+    notes = []
+
+    # Exposures
+    crypto_assets = [c for c in w_opt.index if any(k in c for k in CRYPTO_KEYS)]
+    crypto_exp = float(w_opt.loc[crypto_assets].clip(lower=0).sum()) if crypto_assets else 0.0
+    top_w = w_opt.sort_values(ascending=False).head(3)
+    notes.append(f"Top Weights: {', '.join([f'{k} {v:.0%}' for k,v in top_w.items()])}.")
+    notes.append(f"Crypto Exposure: {crypto_exp:.0%} (Cap {crypto_cap:.0%}).")
+
+    # Regime & risk
+    notes.append(f"Regime detected: **{regime}**; using {('EWMA cov' if use_ewma_now else 'Ledoit-Wolf')} for risk.")
+    notes.append(f"Post-scale Vol target: {target_vol:.0%}, leverage in live series: {scale_live:.2f}×.")
+    notes.append(f"Risk snapshot → VaR1d: {VaR_eff:.2%}, ES1d: {ES_eff:.2%}, MaxDD: {MDD_eff:.2%}.")
+
+    # Suggestions (simple rules)
+    if crypto_exp > crypto_cap + 1e-6:
+        notes.append("🔧 Reduce crypto weights to respect cap.")
+    if MDD_eff < -0.25:
+        notes.append("🛡 Consider lowering target vol or hedging (e.g., bonds/GLD) – drawdown heavy.")
+    if sr_eff < 0.6 and ann_vol_eff > target_vol * 0.9:
+        notes.append("⚖️ Low Sharpe with high vol: review optimizer (try HRP or Min-CVaR) and momentum tilt.")
+
+    # Optional sklearn clustering on realized volatility (last 90d)
+    try:
+        from sklearn.cluster import KMeans
+        feat = pd.DataFrame({
+            "vol": rets.rolling(20).std().iloc[-90:].mean(),
+            "mom": (px.iloc[-1]/px.iloc[-63]-1.0).reindex(rets.columns)
+        }).fillna(0.0)
+        km = KMeans(n_clusters=2, n_init=10, random_state=42).fit(feat.values)
+        cl = km.labels_
+        high_idx = np.argmax([feat.values[cl==i,0].mean() for i in [0,1]])
+        high_cluster_members = feat.index[cl==high_idx].tolist()
+        notes.append(f"🤖 ML Regime (assets): High-vol cluster: {', '.join(high_cluster_members[:6])}{'…' if len(high_cluster_members)>6 else ''}.")
+    except Exception:
+        notes.append("🤖 ML Regime: (optional) install scikit-learn for clustering insights.")
+
+    st.write("\n\n".join(f"- {m}" for m in notes))
+
 # ---------- Report (HTML export) ----------
 with tab_report:
     st.subheader("One-Click HTML Report")
@@ -595,19 +741,19 @@ with tab_report:
     <body style="font-family:Inter,system-ui,sans-serif;background:#0e1117;color:#e5e7eb;">
       <h2>ALLADDIN 2.0 — Summary ({datetime.now().strftime('%Y-%m-%d %H:%M')})</h2>
       <p><b>Universe:</b> {', '.join(tickers)}</p>
-      <p><b>Optimizer:</b> {opt_label} | <b>Regime:</b> {regime} | <b>Crypto cap:</b> {crypto_cap:.0%}</p>
+      <p><b>Optimizer:</b> {opt_label} | <b>Regime:</b> {regime} | <b>Crypto cap:</b> {crypto_cap:.0%} | <b>Leverage:</b> {scale_live:.2f}×</p>
       <h3>Weights</h3>
       <pre>{json.dumps({k: float(v) for k,v in w_opt.round(4).to_dict().items()}, indent=2)}</pre>
-      <h3>Key Metrics</h3>
+      <h3>Key Metrics (post-scale)</h3>
       <ul>
-        <li>Annualized Return: {annualize_stats(port)[0]:.2%}</li>
-        <li>Annualized Volatility: {annualize_stats(port)[1]:.2%}</li>
-        <li>Sharpe: {sharpe_ratio(port):.2f}</li>
-        <li>VaR({int(alpha*100)}%): {VaR:.2%}</li>
-        <li>CVaR({int(alpha*100)}%) ~ {ES:.2%}</li>
-        <li>Max Drawdown: {MDD:.2%}</li>
+        <li>Annualized Return: {ann_ret_eff:.2%}</li>
+        <li>Annualized Volatility: {ann_vol_eff:.2%}</li>
+        <li>Sharpe: {sr_eff:.2f}</li>
+        <li>VaR({int(alpha*100)}%): {VaR_eff:.2%}</li>
+        <li>CVaR({int(alpha*100)}%) ~ {ES_eff:.2%}</li>
+        <li>Max Drawdown: {MDD_eff:.2%}</li>
       </ul>
-      <p class="smallnote">Hinweis: Min-CVaR/HRP benötigen optionale Libraries; bei Fehlen wird robustes Fallback genutzt.</p>
+      <p class="smallnote">Hinweis: HRP und Min-CVaR benötigen optionale Libraries; bei Fehlen wird ein robustes Fallback genutzt. Target-Vol wurde auf die Live-Serie angewendet.</p>
     </body></html>
     """
     st.download_button("Download HTML Report", data=html.encode("utf-8"),
