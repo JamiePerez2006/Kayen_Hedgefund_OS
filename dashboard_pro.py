@@ -1,15 +1,18 @@
 # ==========================================================
-# ALLADDIN 2.1 — MAXI HEDGEFUND (Single-file Streamlit App)
-# Minimal Neon UI • Multi-Optimizer • Walk-Forward BT • EWMA/Regime
-# Target-Vol + Leverage • Momentum Tilt • Stress/Monte-Carlo
-# Rebalance Planner • Presets • Report • AI-Insights (light)
-# Asset set: BTC/ETH/SOL, AAPL, TSLA, NVDA, GLD, NASDAQ, S&P500,
+# ALLADDIN 3.0 — MAXI HEDGEFUND (Single-file Streamlit App)
+# Minimal Neon UI • Multi-Optimizer • Black-Litterman (cost-aware)
+# Walk-Forward (TC/Liquidity) • EWMA/Regime • Target-Vol/Lev
+# Momentum Tilt • Purged K-Fold CV • Deflated Sharpe
+# Stress (2008/2020/2022) • Rebalance Planner • Paper Broker
+# Presets • Report • AI-Insights (light)
+# Asset set: BTC/ETH/SOL, AAPL, TSLA, NVDA, GLD, NASDAQ(QQQ), S&P500(SPY),
 #            MSCI World (URTH), "Starlink/SpaceX" proxy (UFO)
 # ==========================================================
 
-import io, json, math
+import io, json, math, warnings
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -19,8 +22,10 @@ import plotly.graph_objs as go
 import plotly.io as pio
 import matplotlib.pyplot as plt
 
+warnings.filterwarnings("ignore")
+
 # ---------- Page / Theme ----------
-st.set_page_config(page_title="ALLADDIN 2.1 — MAXI HEDGEFUND", layout="wide")
+st.set_page_config(page_title="ALLADDIN 3.0 — MAXI HEDGEFUND", layout="wide")
 
 pio.templates["alladdin"] = go.layout.Template(
     layout=go.Layout(
@@ -85,7 +90,7 @@ hr { border:none; height:1px; background:linear-gradient(90deg,transparent,rgba(
 .stTabs [data-baseweb="tab"] { background: rgba(255,255,255,.06); border-radius: 10px; padding: 8px 12px; }
 .stTabs [aria-selected="true"] { background: rgba(34,211,238,.14); border:1px solid rgba(34,211,238,.35); }
 
-/* Subtle divider */
+/* Card section */
 .section { border:1px solid var(--border); border-radius:14px; padding:16px; background: var(--card); }
 </style>
 """
@@ -93,23 +98,20 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 st.markdown('<div class="background-grid"></div>', unsafe_allow_html=True)
 
 # ---------- Assets (friendly -> ticker map) ----------
-# Your chosen set, with robust proxies where needed.
 ASSET_MAP: Dict[str, str] = {
     "BTCUSD": "BTC-USD",
     "ETHUSD": "ETH-USD",
     "SOLUSD": "SOL-USD",
     "Apple": "AAPL",
     "Tesla": "TSLA",
-    "Gold": "GLD",          # SPDR Gold ETF
+    "Gold": "GLD",
     "NVIDIA": "NVDA",
-    "NASDAQ": "QQQ",        # proxy for Nasdaq-100
-    "S&P 500": "SPY",       # proxy for S&P 500
+    "NASDAQ": "QQQ",        # Nasdaq-100 proxy
+    "S&P 500": "SPY",       # S&P 500 proxy
     "MSCI World ETF": "URTH",
-    "STARLINK (SPACE X)": "UFO",  # Procure Space ETF (satellite/space economy proxy)
+    "STARLINK (SPACE X)": "UFO",  # Procure Space ETF
 }
 FRIENDLY_ORDER = list(ASSET_MAP.keys())
-
-# For crypto detection/caps
 CRYPTO_KEYS = ("BTC", "ETH", "SOL", "-USD")
 
 # ---------- Helpers: math/risk ----------
@@ -195,6 +197,21 @@ def load_prices(tickers: List[str], years: int = 5) -> pd.DataFrame:
                 if not np.isnan(rep): px.at[t, col] = rep
     return px.dropna(how="all")
 
+@st.cache_data(show_spinner=False, ttl=300)
+def load_ohlcv(tickers: List[str], years: int = 5) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Adj Close and Volume for liquidity/impact."""
+    start = (datetime.today() - timedelta(days=365*years)).strftime("%Y-%m-%d")
+    df = yf.download(tickers, start=start, auto_adjust=True, progress=False, group_by="ticker", threads=True)
+    if isinstance(df, pd.DataFrame) and isinstance(df.columns, pd.MultiIndex):
+        px = df.xs("Adj Close", axis=1, level=1) if "Adj Close" in df.columns.get_level_values(1) else df.xs("Close", axis=1, level=1)
+        vol = df.xs("Volume", axis=1, level=1)
+    else:
+        px = df["Adj Close"] if "Adj Close" in df.columns else df["Close"]
+        vol = df["Volume"] if "Volume" in df.columns else pd.DataFrame(index=px.index)
+    px = px.reindex(columns=[t for t in tickers if t in px.columns])
+    vol = vol.reindex(columns=[t for t in tickers if t in vol.columns])
+    return px.dropna(how="all"), vol.fillna(0)
+
 # ---------- Optimizers ----------
 def _project_to_simplex_with_bounds(w: np.ndarray, lb: float, ub: float) -> np.ndarray:
     w = np.clip(w, lb, ub)
@@ -261,14 +278,12 @@ def optimizer_cvar(returns: pd.DataFrame, alpha: float, lb: float, ub: float, al
         v = cp.Variable(1)   # VaR level
         tau = 1 - alpha
         obj = v + (1.0/(tau*T)) * cp.sum(z)
-
         cons = []
         if allow_short:
             cons += [cp.sum(cp.abs(w)) == 1.0, w >= -ub, w <= ub]
         else:
             cons += [cp.sum(w) == 1.0, w >= lb, w <= ub]
         cons += [z >= 0, z >= -(R @ w) - v]
-
         prob = cp.Problem(cp.Minimize(obj), cons)
         prob.solve(solver=cp.ECOS, verbose=False, warm_start=True)
         w_opt = pd.Series(np.array(w.value).ravel(), index=returns.columns).fillna(0.0)
@@ -276,6 +291,82 @@ def optimizer_cvar(returns: pd.DataFrame, alpha: float, lb: float, ub: float, al
         return w_opt, "Min-CVaR"
     except Exception:
         return inverse_variance_weights(returns.cumsum(), lb, ub), "Inverse-Variance"
+
+# ---------- Black-Litterman (cost-aware) ----------
+def black_litterman(px_hist: pd.DataFrame, base_cov: pd.DataFrame, mkt_w: pd.Series,
+                    tau: float, P: np.ndarray, Q: np.ndarray, omega: Optional[np.ndarray]=None) -> Tuple[pd.Series, pd.DataFrame]:
+    """
+    Simple BL: mu_bl = [ (tau*Sigma)^-1 * Pi + P' * Omega^-1 * Q ] solved for posterior.
+    Pi (equilibrium returns) from reverse optimization using mkt_w and Sigma.
+    """
+    # Reverse optimization: Pi = lambda * Sigma * w_mkt  (lambda cancels in ratios)
+    S = base_cov.values
+    w = mkt_w.values.reshape(-1,1)
+    Pi = (S @ w).ravel()
+    if omega is None:
+        # tau-scaled uncertainty for each view
+        omega = np.diag(np.diag(P @ (tau*S) @ P.T))
+    # Posterior
+    A = np.linalg.inv(tau*S)
+    M = A + P.T @ np.linalg.inv(omega) @ P
+    b = A @ Pi + P.T @ np.linalg.inv(omega) @ Q
+    mu_bl = np.linalg.solve(M, b)
+    mu_bl = pd.Series(mu_bl, index=px_hist.columns)
+    # Posterior covariance
+    cov_bl = pd.DataFrame(np.linalg.inv(M), index=px_hist.columns, columns=px_hist.columns)
+    return mu_bl, cov_bl
+
+def optimizer_black_litterman(px_hist: pd.DataFrame, lb: float, ub: float,
+                              views_df: pd.DataFrame, tau: float=0.025, cost_bps: float=5.0) -> Tuple[pd.Series, str]:
+    """
+    BL optimizer with simple trading-cost penalty: max mu'w - lambda*w'Sw - gamma*|Δw|
+    Here we approximate by solving min variance for given mu via PyPortfolioOpt EF,
+    then apply a linear bps penalty on turnover vs market weights (proxy = inverse-variance).
+    """
+    rets = to_returns(px_hist)
+    S = ewma_cov(rets)  # robust default
+    # Market prior weights: inverse-variance proxy
+    w_mkt = inverse_variance_weights(px_hist, 0, 1.0)
+    # Build views (P,Q) from DataFrame rows: columns=['Asset','Type','Value']
+    # Type: 'rel' -> Asset vs others equal weight ; 'abs' -> absolute annualized expected return
+    cols = list(px_hist.columns)
+    P_list, Q_list = [], []
+    for _, r in views_df.iterrows():
+        asset, vtype, val = r["Asset"], r["Type"], r["Value"]
+        if asset not in cols: continue
+        row = np.zeros(len(cols))
+        j = cols.index(asset)
+        if vtype == "abs":
+            row[j] = 1.0
+            P_list.append(row); Q_list.append(float(val))
+        else:  # relative vs equal basket
+            row[j] = 1.0
+            others = [i for i in range(len(cols)) if i != j]
+            row[others] = -1.0/len(others)
+            P_list.append(row); Q_list.append(float(val))
+    if not P_list:
+        # No views: fall back to min-vol
+        return optimizer_min_vol(px_hist, lb, ub, use_ewma=True)
+    P = np.vstack(P_list); Q = np.array(Q_list)
+    mu_bl, cov_bl = black_litterman(px_hist, S, w_mkt, tau=tau, P=P, Q=Q)
+
+    try:
+        from pypfopt.efficient_frontier import EfficientFrontier
+        ef = EfficientFrontier(mu_bl, cov_bl, weight_bounds=(lb, ub))
+        w = pd.Series(ef.max_sharpe())  # go for Sharpe on BL posterior
+        w.index = pd.Index(w.index, dtype=str)
+        w = w.fillna(0.0); w = w / w.sum()
+    except Exception:
+        # heuristic if EF not available
+        inv = 1.0 / (np.diag(cov_bl) + 1e-9)
+        pref = inv * (mu_bl.values - mu_bl.values.mean())
+        w = pd.Series(_project_to_simplex_with_bounds(pref, lb, ub), index=px_hist.columns)
+
+    # simple ex-ante cost shrink toward market weights (penalize distance)
+    gamma = cost_bps/10000.0
+    w = (1-gamma)*w + gamma*w_mkt.reindex_like(w).fillna(0.0)
+    w = w / w.sum()
+    return w, "Black-Litterman (cost-aware)"
 
 # ---------- Group/Crypto Caps ----------
 def apply_crypto_cap(weights: pd.Series, crypto_cap: float) -> pd.Series:
@@ -296,7 +387,7 @@ def apply_crypto_cap(weights: pd.Series, crypto_cap: float) -> pd.Series:
 # ---------- UI Header ----------
 colH1, colH2 = st.columns([0.8, 0.2])
 with colH1:
-    st.title("ALLADDIN 2.1 — MAXI HEDGEFUND")
+    st.title("ALLADDIN 3.0 — MAXI HEDGEFUND")
     st.caption(datetime.now().strftime("%d.%m.%Y %H:%M"))
 with colH2:
     st.markdown("<div class='section' style='text-align:center;'>🌐<br/>Neon Mode</div>", unsafe_allow_html=True)
@@ -311,14 +402,12 @@ with colA:
 with colB:
     preset_toggle = st.checkbox("Use KAYEN preset", value=True)
 
-# Only your asset set (friendly names)
 DEFAULT_FRIENDLY = ["BTCUSD","ETHUSD","SOLUSD","Apple","Tesla","Gold","NVIDIA","NASDAQ","S&P 500","MSCI World ETF","STARLINK (SPACE X)"]
 friendly_selection = st.sidebar.multiselect(
     "Universe (choose from your set)",
     options=FRIENDLY_ORDER,
     default=DEFAULT_FRIENDLY if preset_toggle else DEFAULT_FRIENDLY
 )
-# Map to yfinance tickers
 tickers = [ASSET_MAP[x] for x in friendly_selection]
 
 years = st.sidebar.slider("Years of history", 2, 15, value=5)
@@ -338,36 +427,51 @@ mom_strength = st.sidebar.slider("Momentum tilt strength", 0.0, 1.0, 0.30, step=
 mom_lb = st.sidebar.selectbox("Momentum lookback", ["6M","9M","12M"], index=2)
 
 # Optimizer choice
-opt_choice = st.sidebar.selectbox("Optimizer", ["Min-Vol", "HRP", "Min-CVaR (tail risk)"], index=0)
+opt_choice = st.sidebar.selectbox("Optimizer", ["Min-Vol", "HRP", "Min-CVaR", "Black-Litterman"], index=0)
 use_ewma = st.sidebar.checkbox("Use EWMA cov in high-vol regime (auto)", value=True)
 
-# Walk-forward settings
+# Walk-forward settings + TC/Liquidity
 wf_reb = st.sidebar.selectbox("Backtest rebalance", ["Monthly","Weekly"], index=0)
-wf_cost_bps = st.sidebar.number_input("Transaction cost (bps per turnover)", 0, 200, value=10, step=5)
-wf_turnover_cap = st.sidebar.slider("Turnover cap per rebalance", 0.05, 1.0, value=0.35, step=0.05)
+wf_cost_bps = st.sidebar.number_input("Base TC (bps per turnover)", 0, 300, value=10, step=5)
+wf_impact_k = st.sidebar.slider("Impact coef (sqrt model)", 0.0, 50.0, 8.0, step=0.5)
+wf_turnover_cap = st.sidebar.slider("Turnover cap per rebalance", 0.05, 1.0, 0.35, step=0.05)
+wf_adv_days = st.sidebar.slider("ADV window (days)", 10, 60, 20, step=5)
+wf_max_pct_adv = st.sidebar.slider("Max notional per rebalance as %ADV", 1.0, 50.0, 10.0, step=1.0)
 
-# Note about proxies
-proxy_note = []
-if "NASDAQ" in friendly_selection: proxy_note.append("NASDAQ → QQQ")
-if "MSCI World ETF" in friendly_selection: proxy_note.append("MSCI World → URTH")
-if "STARLINK (SPACE X)" in friendly_selection: proxy_note.append("STARLINK/SpaceX → UFO (satellite ETF)")
-if proxy_note:
-    st.sidebar.caption("Proxies: " + " • ".join(proxy_note))
+# Presets save/load
+st.sidebar.markdown("**Presets**")
+if st.sidebar.button("Save current preset"):
+    preset = {
+        "friendly_selection": friendly_selection, "years": years, "min_w": min_w, "max_w": max_w,
+        "crypto_cap": crypto_cap, "alpha": alpha, "allow_short": allow_short,
+        "portfolio_value": portfolio_value, "opt_choice": opt_choice,
+        "use_ewma": use_ewma, "wf_reb": wf_reb, "wf_cost_bps": wf_cost_bps,
+        "wf_turnover_cap": wf_turnover_cap, "target_vol": target_vol,
+        "max_leverage": max_leverage, "mom_strength": mom_strength, "mom_lb": mom_lb,
+        "wf_adv_days": wf_adv_days, "wf_max_pct_adv": wf_max_pct_adv, "wf_impact_k": wf_impact_k
+    }
+    st.sidebar.download_button("Download preset.json", data=json.dumps(preset, indent=2).encode(),
+                               file_name="preset.json", mime="application/json")
+uploaded = st.sidebar.file_uploader("Load preset.json", type=["json"])
+if uploaded:
+    try:
+        preset = json.load(uploaded)
+        st.session_state.update(preset)
+        st.sidebar.success("Preset loaded. Bitte Seite neu laden (R).")
+    except Exception as e:
+        st.sidebar.error(f"Preset error: {e}")
 
 # ---------- Data ----------
 if len(tickers) == 0:
-    st.warning("Bitte mindestens einen Ticker wählen.")
-    st.stop()
+    st.warning("Bitte mindestens einen Ticker wählen."); st.stop()
 
 try:
-    px = load_prices(tickers, years=years)
+    px, vol = load_ohlcv(tickers, years=years)
     if px.empty:
-        st.error("Keine Preisdaten geladen — prüfe Ticker.")
-        st.stop()
+        st.error("Keine Preisdaten geladen — prüfe Ticker."); st.stop()
     rets = to_returns(px).dropna(how="all")
 except Exception as e:
-    st.error(f"Datenfehler: {e}")
-    st.stop()
+    st.error(f"Datenfehler: {e}"); st.stop()
 
 # Data Quality quick checks
 dq_missing = float(px.isna().mean().mean())
@@ -381,12 +485,29 @@ if dq_missing > 0.02 or dq_min_hist < 250:
 regime = regime_tag(rets)
 use_ewma_now = (use_ewma and regime == "high-vol")
 
+# Black-Litterman Views UI (only shown if BL chosen)
+default_views = pd.DataFrame(
+    {"Asset":[tickers[0] if len(tickers) else ""],
+     "Type":["abs"], "Value":[0.08]},
+)
+views_df = None
+if opt_choice == "Black-Litterman":
+    st.sidebar.markdown("**Black-Litterman Views**")
+    st.sidebar.caption("Type: abs = erwartete Jahresrendite; rel = besser als Korb.")
+    views_df = st.sidebar.data_editor(default_views, num_rows="dynamic", use_container_width=True)
+
 if opt_choice == "Min-Vol":
     w_opt, opt_label = optimizer_min_vol(px, lb=min_w, ub=max_w, use_ewma=use_ewma_now)
 elif opt_choice == "HRP":
     w_opt, opt_label = optimizer_hrp(px, lb=min_w, ub=max_w)
-else:
+elif opt_choice == "Min-CVaR":
     w_opt, opt_label = optimizer_cvar(rets, alpha=alpha, lb=min_w, ub=max_w, allow_short=allow_short)
+else:
+    try:
+        w_opt, opt_label = optimizer_black_litterman(px, lb=min_w, ub=max_w,
+                                                     views_df=views_df if views_df is not None else pd.DataFrame(columns=["Asset","Type","Value"]))
+    except Exception:
+        w_opt, opt_label = optimizer_min_vol(px, lb=min_w, ub=max_w, use_ewma=True)
 
 w_opt = w_opt.reindex(px.columns).fillna(0.0)
 w_opt = apply_crypto_cap(w_opt, crypto_cap)
@@ -396,7 +517,7 @@ if w_opt.sum() > 0: w_opt = w_opt / w_opt.sum()
 lb_map = {"6M":126, "9M":189, "12M":252}
 lb = lb_map[mom_lb]
 mom = (px/px.shift(lb) - 1.0).iloc[-1].reindex(w_opt.index).fillna(0.0)
-mom_score = (mom.rank(pct=True) - 0.5)  # centered
+mom_score = (mom.rank(pct=True) - 0.5)
 w_tilt = w_opt * (1 + mom_strength * mom_score)
 if w_tilt.sum() > 0: w_opt = (w_tilt / w_tilt.sum()).fillna(0.0)
 
@@ -417,12 +538,11 @@ ann_ret_eff, ann_vol_eff = annualize_stats(port_eff)
 sr_eff  = sharpe_ratio(port_eff)
 VaR_eff, ES_eff = hist_var_es(port_eff, alpha=alpha)
 MDD_eff = max_drawdown(cum_eff)
-
 roll_sharpe = port_eff.rolling(60).apply(lambda x: 0.0 if np.std(x)==0 else (np.mean(x)/np.std(x))*np.sqrt(252), raw=True)
 
 # ---------- Tabs ----------
-tab_overview, tab_risk, tab_backtest, tab_factors, tab_stress, tab_trades, tab_ai, tab_report = st.tabs(
-    ["Overview", "Risk", "Backtest", "Factors", "Stress", "Trades", "AI Insights", "Report"]
+tab_overview, tab_risk, tab_backtest, tab_cv, tab_factors, tab_stress, tab_trades, tab_broker, tab_ai, tab_report = st.tabs(
+    ["Overview", "Risk", "Backtest", "CV & DS", "Factors", "Stress", "Trades", "Paper Broker", "AI Insights", "Report"]
 )
 
 # ---------- Overview ----------
@@ -451,12 +571,11 @@ with tab_overview:
 
     st.markdown("<div class='section'>", unsafe_allow_html=True)
     L, R = st.columns([1.25, 1.0])
+    fr_names = {ASSET_MAP[k]:k for k in ASSET_MAP}
     with L:
         st.subheader("Portfolio Overview (target)")
         ytd = {t: rets[t].loc[rets.index.year == rets.index[-1].year].sum() if t in rets.columns else 0.0 for t in px.columns}
         df_over = pd.DataFrame({"Weight": w_opt.round(4), "YTD Return": pd.Series(ytd).round(4)})
-        # Show friendly names if possible
-        fr_names = {ASSET_MAP[k]:k for k in ASSET_MAP}
         df_over.index = [fr_names.get(idx, idx) for idx in df_over.index]
         st.dataframe(df_over, use_container_width=True)
     with R:
@@ -509,7 +628,7 @@ with tab_risk:
     except Exception as e:
         st.warning(f"Monte Carlo nicht verfügbar: {e}")
 
-# ---------- Backtest (Walk-Forward with risk targeting) ----------
+# ---------- Backtest (Walk-Forward with TC/Liquidity + risk targeting) ----------
 def monthly_dates(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
     g = pd.Series(index=index, data=True)
     return g.groupby([index.year, index.month]).head(1).index
@@ -518,32 +637,68 @@ def weekly_dates(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
     g = pd.Series(index=index, data=True)
     return g.groupby([index.year, index.isocalendar().week]).head(1).index
 
-def rebalance_backtest(px: pd.DataFrame, rets: pd.DataFrame, dates: pd.DatetimeIndex,
-                       lb: float, ub: float, crypto_cap: float, cost_bps: float,
+def rebalance_backtest(px: pd.DataFrame, rets: pd.DataFrame, vol_df: pd.DataFrame, dates: pd.DatetimeIndex,
+                       lb: float, ub: float, crypto_cap: float, base_bps: float,
+                       impact_k: float, adv_days: int, max_pct_adv: float,
                        turnover_cap: float, opt_choice: str, use_ewma: bool,
-                       alpha: float, allow_short: bool,
-                       target_vol: float, max_leverage: float) -> pd.Series:
+                       alpha: float, allow_short: bool, views_df: Optional[pd.DataFrame],
+                       target_vol: float, max_leverage: float, min_hist: int=63) -> pd.Series:
     w_prev = None
     eq = []
     equity = 1.0
+    adv = (vol_df.rolling(adv_days).mean() * px).fillna(0.0)  # ADV in notional ≈ price * shares
     for dt in rets.index:
         if dt in dates:
             px_hist = px.loc[:dt].dropna()
-            if opt_choice == "Min-Vol":
-                w = optimizer_min_vol(px_hist, lb, ub, use_ewma)[0]
-            elif opt_choice == "HRP":
-                w = optimizer_hrp(px_hist, lb, ub)[0]
+            if px_hist.shape[0] < min_hist:
+                w = pd.Series(1.0/len(rets.columns), index=rets.columns, dtype=float)
             else:
-                w = optimizer_cvar(rets.loc[:dt].dropna(), alpha, lb, ub, allow_short)[0]
-            w = apply_crypto_cap(w, crypto_cap)
-            if w.sum() > 0: w = w / w.sum()
+                if opt_choice == "Min-Vol":
+                    w = optimizer_min_vol(px_hist, lb, ub, use_ewma)[0]
+                elif opt_choice == "HRP":
+                    w = optimizer_hrp(px_hist, lb, ub)[0]
+                elif opt_choice == "Min-CVaR":
+                    w = optimizer_cvar(to_returns(px_hist), alpha, lb, ub, allow_short)[0]
+                else:
+                    try:
+                        w = optimizer_black_litterman(px_hist, lb, ub,
+                                                      views_df=views_df if views_df is not None else pd.DataFrame(columns=["Asset","Type","Value"]))[0]
+                    except Exception:
+                        w = optimizer_min_vol(px_hist, lb, ub, True)[0]
+                w = apply_crypto_cap(w, crypto_cap)
+                if w.sum() > 0: w = w / w.sum()
 
-            # Turnover & costs
             if w_prev is not None:
-                delta = (w - w_prev).abs().sum()
-                if delta > turnover_cap:
-                    w = w_prev + (w - w_prev) * (turnover_cap / delta)
-                equity *= (1.0 - (cost_bps/10000.0) * delta)
+                delta = (w - w_prev).abs()
+                turnover = float(delta.sum())
+                # Liquidity cap: limit notional traded vs ADV
+                adv_now = adv.reindex(index=[dt]).ffill().iloc[0].reindex(w.index).replace(0, np.nan)
+                desired_notional = delta * equity  # equity is index=1 start
+                max_notional = (max_pct_adv/100.0) * adv_now
+                # If ADV data missing, skip cap for that asset
+                scale = 1.0
+                mask = (~max_notional.isna()) & (max_notional>0)
+                if mask.any():
+                    ratio = (desired_notional[mask] / max_notional[mask]).max()
+                    if ratio > 1.0:
+                        scale = 1.0/float(ratio)
+                delta *= scale
+                # Apply turnover cap
+                if float(delta.sum()) > turnover_cap:
+                    delta = delta * (turnover_cap / float(delta.sum()))
+                # Slippage/Impact cost: base bps + k * sqrt(notional/ADV)
+                traded_notional = delta * equity
+                imp = pd.Series(0.0, index=w.index, dtype=float)
+                if mask.any():
+                    z = traded_notional[mask] / max_notional[mask].replace(0,np.nan)
+                    imp.loc[mask] = (base_bps/10000.0) + (impact_k/10000.0) * np.sqrt(z.clip(lower=0.0).fillna(0.0))
+                else:
+                    imp += (base_bps/10000.0)
+                tc = float(imp.fillna(base_bps/10000.0).sum())
+                equity *= (1.0 - tc)
+                # Move weights by delta toward target
+                w = w_prev + np.sign(w - w_prev) * delta
+                w = w / w.sum()
             w_prev = w.copy()
 
         if w_prev is None:
@@ -560,19 +715,16 @@ def rebalance_backtest(px: pd.DataFrame, rets: pd.DataFrame, dates: pd.DatetimeI
     return pd.Series(eq, index=rets.index, name="Portfolio")
 
 with tab_backtest:
-    st.subheader("Walk-Forward Backtest · Portfolio vs Benchmark")
+    st.subheader("Walk-Forward Backtest · Portfolio vs Benchmark (TC/Liquidity-aware)")
     bt_years = st.slider("Backtest years", 2, 15, value=min(5, years), key="bt_years")
-    px_bt = load_prices(tickers, years=bt_years)
+    px_bt, vol_bt = load_ohlcv(tickers, years=bt_years)
     rets_bt = to_returns(px_bt).dropna()
-    rebal_dates = monthly_dates(rets_bt.index) if st.session_state.get("wf_reb_sel", "Monthly") == "Monthly" else weekly_dates(rets_bt.index)
-    # ensure selection sync
-    st.session_state["wf_reb_sel"] = wf_reb
     rebal_dates = monthly_dates(rets_bt.index) if wf_reb == "Monthly" else weekly_dates(rets_bt.index)
-
-    eq = rebalance_backtest(px_bt, rets_bt, rebal_dates, lb=min_w, ub=max_w, crypto_cap=crypto_cap,
-                            cost_bps=wf_cost_bps, turnover_cap=wf_turnover_cap,
+    eq = rebalance_backtest(px_bt, rets_bt, vol_bt, rebal_dates, lb=min_w, ub=max_w, crypto_cap=crypto_cap,
+                            base_bps=wf_cost_bps, impact_k=wf_impact_k, adv_days=wf_adv_days,
+                            max_pct_adv=wf_max_pct_adv, turnover_cap=wf_turnover_cap,
                             opt_choice=opt_choice, use_ewma=use_ewma_now, alpha=alpha, allow_short=allow_short,
-                            target_vol=target_vol, max_leverage=max_leverage)
+                            views_df=views_df, target_vol=target_vol, max_leverage=max_leverage)
 
     bench_ticker = st.selectbox("Benchmark", ["SPY","QQQ","URTH","GLD"], index=0, key="bench")
     bench_px = yf.download(bench_ticker, period=f"{bt_years}y", auto_adjust=True, progress=False)["Close"].dropna()
@@ -605,6 +757,50 @@ with tab_backtest:
     else:
         st.markdown("Outperformance: n/a")
 
+# ---------- Purged K-Fold CV + Deflated Sharpe ----------
+def time_series_folds(index: pd.DatetimeIndex, k: int=5, embargo: int=10):
+    n = len(index)
+    fold_size = n // k
+    for i in range(k):
+        start = i*fold_size
+        end = (i+1)*fold_size if i<k-1 else n
+        test_idx = index[start:end]
+        # embargo
+        pre_end = max(0, start-embargo); post_start = min(n, end+embargo)
+        train_idx = index[:pre_end].append(index[post_start:])
+        yield train_idx, test_idx
+
+def deflated_sharpe(sr_hat: float, T: int, sr_mean: float, sr_std: float, n_trials: int) -> float:
+    # Bailey et al. approximation
+    from math import sqrt
+    sr0 = sr_hat
+    z = (sr0 - sr_mean) / sr_std if sr_std>0 else 0.0
+    emax = sr_mean + sr_std * (1 - 0.75*(np.log(np.log(n_trials))) / np.sqrt(2*np.log(n_trials))) if n_trials>1 else sr_mean
+    dsr = (sr0 - emax) * np.sqrt(T)
+    return dsr
+
+with tab_cv:
+    st.subheader("Purged K-Fold Cross-Validation & Deflated Sharpe")
+    k = st.slider("Folds (K)", 3, 10, 5)
+    embargo = st.slider("Embargo (days)", 0, 30, 10)
+    if len(port_eff) > 200:
+        srs = []
+        for tr_idx, te_idx in time_series_folds(port_eff.index, k=k, embargo=embargo):
+            te = port_eff.reindex(te_idx).dropna()
+            sr_te = sharpe_ratio(te) if len(te)>0 else 0.0
+            srs.append(sr_te)
+        cv_sr_mean = float(np.mean(srs)) if srs else 0.0
+        cv_sr_std  = float(np.std(srs)) if srs else 0.0
+        T = len(port_eff)
+        ds = deflated_sharpe(sr_eff, T, cv_sr_mean, cv_sr_std, n_trials=k)
+        c1,c2,c3 = st.columns(3)
+        c1.metric("CV Sharpe (mean)", f"{cv_sr_mean:.2f}")
+        c2.metric("CV Sharpe (std)", f"{cv_sr_std:.2f}")
+        c3.metric("Deflated Sharpe", f"{ds:.2f}")
+        st.caption("Deflated Sharpe ~ Overfitting-korrigierter Sharpe (Bailey-Approx, grob).")
+    else:
+        st.info("Zu wenig History für CV. Erhöhe 'Years of history' oder nutze breiteres Universum.")
+
 # ---------- Factors ----------
 with tab_factors:
     st.subheader("Factor Attribution (Daily Returns Regression)")
@@ -612,7 +808,6 @@ with tab_factors:
     fac_px = load_prices(list(factor_map.values()), years=min(5, years))
     fac_rets = to_returns(fac_px)
 
-    port_eff = port * scale_live
     y = port_eff.reindex(fac_rets.index).dropna()
     X = fac_rets.reindex(y.index).fillna(0.0).copy()
     X.columns = list(factor_map.keys())
@@ -620,20 +815,16 @@ with tab_factors:
     beta = {}; r2 = 0.0
     try:
         import statsmodels.api as sm
-        X_ = sm.add_constant(X)
-        model = sm.OLS(y.values, X_.values).fit()
-        r2 = float(model.rsquared)
-        coefs = dict(zip(["Const"] + list(X.columns), model.params))
-        for k in X.columns: beta[k] = float(coefs.get(k, 0.0))
+        X_ = sm.add_constant(X); model = sm.OLS(y.values, X_.values).fit()
+        r2 = float(model.rsquared); coefs = dict(zip(["Const"] + list(X.columns), model.params))
+        for kf in X.columns: beta[kf] = float(coefs.get(kf, 0.0))
     except Exception:
         X_ = np.column_stack([np.ones(len(X)), X.values])
         coef, *_ = np.linalg.lstsq(X_, y.values, rcond=None)
         pred = X_ @ coef
-        ss_res = np.sum((y.values - pred)**2)
-        ss_tot = np.sum((y.values - y.values.mean())**2)
+        ss_res = np.sum((y.values - pred)**2); ss_tot = np.sum((y.values - y.values.mean())**2)
         r2 = 0.0 if ss_tot==0 else 1 - ss_res/ss_tot
-        for i, k in enumerate(X.columns, start=1):
-            beta[k] = float(coef[i])
+        for i, kf in enumerate(X.columns, start=1): beta[kf] = float(coef[i])
 
     betas_df = pd.DataFrame({"Beta": beta}).T.round(4)
     st.dataframe(betas_df, use_container_width=True)
@@ -641,19 +832,22 @@ with tab_factors:
 
 # ---------- Stress Testing ----------
 with tab_stress:
-    st.subheader("Instant Stress Test")
-    st.caption("Simuliere 1-Tages-Schocks. P&L bezieht sich auf die post-scale Serie (Vol-Target).")
-
+    st.subheader("Instant & Historical Stress")
+    st.caption("1-Tages-Schocks (instant) & historische Szenarien mapped auf das Portfolio (post-scale).")
     scenario_lib = {
-        "Tech + Crypto Crash": {"AAPL": -0.15, "TSLA": -0.18, "QQQ": -0.12, "BTC-USD": -0.25, "ETH-USD": -0.35},
+        "Tech + Crypto Crash": {"AAPL": -0.15, "TSLA": -0.18, "QQQ": -0.12, "BTC-USD": -0.25, "ETH-USD": -0.35, "NVDA": -0.16},
         "Rates Spike": {"URTH": -0.05, "SPY": -0.04, "GLD": -0.03},
         "USD Surge": {"GLD": -0.03, "SPY": -0.03},
         "Crypto Winter": {"BTC-USD": -0.30, "ETH-USD": -0.40, "SOL-USD": -0.45},
+        # Historical day-shocks (approx): 2008 worst day, 2020 crash day, 2022 CPI shock stylized
+        "2008 Crisis Day": {"SPY": -0.09, "QQQ": -0.08, "GLD": 0.02, "URTH": -0.08},
+        "2020 Covid Crash Day": {"SPY": -0.12, "QQQ": -0.11, "GLD": -0.03, "URTH": -0.11},
+        "2022 Inflation Shock": {"SPY": -0.04, "QQQ": -0.06, "GLD": -0.01, "UFO": -0.05}
     }
 
     scn = st.selectbox("Scenario", list(scenario_lib.keys()), index=0)
     pick = st.multiselect("Assets to shock (optional override)", options=list(px.columns), default=[])
-    shock_pct = st.slider("Shock size (manual, %)", -40, 40, -5, step=1)
+    shock_pct = st.slider("Shock size (manual, %)", -50, 50, -5, step=1)
 
     left, right = st.columns(2)
     with left:
@@ -691,7 +885,6 @@ with tab_trades:
     last_prices = px.iloc[-1].reindex(w_opt.index).fillna(0.0)
     notional = (delta * float(portfolio_value)).rename("Trade Notional (EUR)")
 
-    # Friendly index for display
     fr_names = {ASSET_MAP[k]:k for k in ASSET_MAP}
     plan = pd.concat([
         current.rename("Current"),
@@ -708,11 +901,79 @@ with tab_trades:
     st.download_button("Download Rebalance Plan (CSV)", data=buf.getvalue(),
                        file_name="rebalance_plan.csv", mime="text/csv")
 
+# ---------- Paper Broker (stub) ----------
+@dataclass
+class BrokerState:
+    cash: float = 100000.0
+    positions: Dict[str, float] = field(default_factory=dict)  # shares
+    history: List[Dict] = field(default_factory=list)
+
+def broker_mark_to_market(state: BrokerState, prices: pd.Series) -> Tuple[float, float]:
+    pos_val = sum(state.positions.get(t,0.0) * prices.get(t, np.nan) for t in state.positions.keys())
+    equity = state.cash + pos_val
+    return pos_val, equity
+
+if "broker" not in st.session_state:
+    st.session_state.broker = BrokerState(cash=float(portfolio_value))
+
+with tab_broker:
+    st.subheader("Paper Broker — Orders, Positions & P&L")
+    b: BrokerState = st.session_state.broker
+    prices = px.iloc[-1]
+    pos_val, equity = broker_mark_to_market(b, prices)
+    c1,c2,c3 = st.columns(3)
+    c1.metric("Cash", f"{b.cash:,.2f}"); c2.metric("Positions Value", f"{pos_val:,.2f}"); c3.metric("Equity", f"{equity:,.2f}")
+
+    # simple order ticket
+    col1, col2, col3, col4 = st.columns([1.2,1,1,1])
+    with col1:
+        sym = st.selectbox("Symbol", list(px.columns))
+    with col2:
+        side = st.selectbox("Side", ["BUY","SELL"])
+    with col3:
+        qty = st.number_input("Qty (shares)", min_value=0.0, value=0.0, step=1.0)
+    with col4:
+        if st.button("Submit Order"):
+            px_now = prices.get(sym, np.nan)
+            if np.isnan(px_now) or qty<=0:
+                st.warning("Ungültiger Preis oder Menge.")
+            else:
+                cost = qty * px_now
+                if side=="BUY":
+                    if b.cash >= cost:
+                        b.cash -= cost; b.positions[sym] = b.positions.get(sym,0.0) + qty
+                        b.history.append({"ts":datetime.now().isoformat(),"sym":sym,"side":side,"qty":qty,"px":px_now})
+                        st.success("Order ausgeführt.")
+                    else:
+                        st.error("Nicht genug Cash.")
+                else:
+                    have = b.positions.get(sym,0.0)
+                    if have >= qty:
+                        b.positions[sym] = have - qty; b.cash += cost
+                        b.history.append({"ts":datetime.now().isoformat(),"sym":sym,"side":side,"qty":qty,"px":px_now})
+                        st.success("Order ausgeführt.")
+                    else:
+                        st.error("Nicht genug Bestand.")
+
+    st.markdown("**Open Positions**")
+    if b.positions:
+        df_pos = pd.DataFrame.from_dict(b.positions, orient="index", columns=["Shares"])
+        df_pos["Last Price"] = [prices.get(k,np.nan) for k in df_pos.index]
+        df_pos["Market Value"] = df_pos["Shares"] * df_pos["Last Price"]
+        st.dataframe(df_pos.round(4), use_container_width=True)
+    else:
+        st.write("Keine Positionen.")
+
+    st.markdown("**Order History**")
+    if b.history:
+        st.dataframe(pd.DataFrame(b.history), use_container_width=True)
+    else:
+        st.write("Keine Orders bisher.")
+
 # ---------- AI Insights (light) ----------
 with tab_ai:
     st.subheader("AI Insights (Explain & Suggest)")
     notes = []
-
     crypto_assets = [c for c in w_opt.index if any(k in c for k in CRYPTO_KEYS)]
     crypto_exp = float(w_opt.loc[crypto_assets].clip(lower=0).sum()) if crypto_assets else 0.0
     top_w = w_opt.sort_values(ascending=False).head(3)
@@ -721,14 +982,9 @@ with tab_ai:
     notes.append(f"Regime detected: **{regime}**; risk model: {('EWMA' if use_ewma_now else 'Ledoit-Wolf')}.")
     notes.append(f"Vol target {target_vol:.0%} → live leverage: {scale_live:.2f}×.")
     notes.append(f"Risk snapshot → VaR1d: {VaR_eff:.2%}, ES1d: {ES_eff:.2%}, MaxDD: {MDD_eff:.2%}.")
-
-    if crypto_exp > crypto_cap + 1e-6:
-        notes.append("🔧 Reduce crypto weights to respect cap.")
-    if MDD_eff < -0.25:
-        notes.append("🛡 Drawdown heavy: lower target vol or add hedges (GLD/URTH/long bonds).")
-    if sr_eff < 0.6 and ann_vol_eff > target_vol * 0.9:
-        notes.append("⚖️ Low Sharpe w/ high vol → try HRP or Min-CVaR + tune momentum tilt.")
-
+    if crypto_exp > crypto_cap + 1e-6: notes.append("🔧 Reduce crypto weights to respect cap.")
+    if MDD_eff < -0.25: notes.append("🛡 Drawdown heavy: lower target vol or add hedges (GLD/URTH/long bonds).")
+    if sr_eff < 0.6 and ann_vol_eff > target_vol * 0.9: notes.append("⚖️ Low Sharpe w/ high vol → try HRP or Min-CVaR + tune momentum tilt.")
     try:
         from sklearn.cluster import KMeans
         feat = pd.DataFrame({
@@ -736,13 +992,11 @@ with tab_ai:
             "mom": (px.iloc[-1]/px.iloc[-63]-1.0).reindex(rets.columns)
         }).fillna(0.0)
         km = KMeans(n_clusters=2, n_init=10, random_state=42).fit(feat.values)
-        cl = km.labels_
-        high_idx = np.argmax([feat.values[cl==i,0].mean() for i in [0,1]])
+        cl = km.labels_; high_idx = np.argmax([feat.values[cl==i,0].mean() for i in [0,1]])
         high_cluster_members = feat.index[cl==high_idx].tolist()
         notes.append("🤖 ML Regime: High-vol cluster → " + ", ".join(high_cluster_members[:6]) + ("…" if len(high_cluster_members)>6 else ""))
     except Exception:
         notes.append("🤖 ML Regime: (optional) install scikit-learn for clustering insights.")
-
     st.write("\n\n".join(f"- {m}" for m in notes))
 
 # ---------- Report ----------
@@ -750,10 +1004,14 @@ with tab_report:
     st.subheader("One-Click HTML Report")
     fr_names = {ASSET_MAP[k]:k for k in ASSET_MAP}
     weights_named = {fr_names.get(k,k): float(v) for k,v in w_opt.round(4).to_dict().items()}
+    proxy_note = []
+    if "QQQ" in tickers: proxy_note.append("NASDAQ → QQQ")
+    if "URTH" in tickers: proxy_note.append("MSCI World → URTH")
+    if "UFO"  in tickers: proxy_note.append("STARLINK/SpaceX → UFO (space economy ETF)")
     html = f"""
-    <html><head><meta charset="utf-8"><title>ALLADDIN 2.1 Report</title></head>
+    <html><head><meta charset="utf-8"><title>ALLADDIN 3.0 Report</title></head>
     <body style="font-family:Inter,system-ui,sans-serif;background:#0c0f14;color:#e5e7eb;">
-      <h2>ALLADDIN 2.1 — Summary ({datetime.now().strftime('%Y-%m-%d %H:%M')})</h2>
+      <h2>ALLADDIN 3.0 — Summary ({datetime.now().strftime('%Y-%m-%d %H:%M')})</h2>
       <p><b>Universe:</b> {', '.join(friendly_selection)}</p>
       <p><b>Proxies:</b> {'; '.join(proxy_note) if proxy_note else '—'}</p>
       <p><b>Optimizer:</b> {opt_label} | <b>Regime:</b> {regime} | <b>Crypto cap:</b> {crypto_cap:.0%} | <b>Leverage:</b> {scale_live:.2f}×</p>
@@ -768,10 +1026,9 @@ with tab_report:
         <li>CVaR({int(alpha*100)}%) ~ {ES_eff:.2%}</li>
         <li>Max Drawdown: {MDD_eff:.2%}</li>
       </ul>
-      <p style="color:#94a3b8;">Hinweis: Einige Assets sind über liquide ETFs proxied (QQQ, URTH, UFO).</p>
+      <p style="color:#94a3b8;">Hinweis: BL/HRP/Min-CVaR benötigen optionale Libraries; bei Fehlen wird ein robustes Fallback genutzt.</p>
     </body></html>
     """
     st.download_button("Download HTML Report", data=html.encode("utf-8"),
                        file_name="alladdin_report.html", mime="text/html")
-
 # ================== END ==================
