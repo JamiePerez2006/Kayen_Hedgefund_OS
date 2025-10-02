@@ -1,14 +1,13 @@
 # ==========================================================
-# ALLADDIN 2.0 — MAXI HEDGEFUND (Single-file Streamlit App)
-# Premium Look • Multi-Optimizer • Walk-Forward BT • EWMA/Regime
-# Target-Vol+Leverage • Momentum Tilt • Stress/Monte-Carlo
-# Rebalance Planner • Presets • Reports • KI-Insights
+# ALLADDIN 2.1 — MAXI HEDGEFUND (Single-file Streamlit App)
+# Minimal Neon UI • Multi-Optimizer • Walk-Forward BT • EWMA/Regime
+# Target-Vol + Leverage • Momentum Tilt • Stress/Monte-Carlo
+# Rebalance Planner • Presets • Report • AI-Insights (light)
+# Asset set: BTC/ETH/SOL, AAPL, TSLA, NVDA, GLD, NASDAQ, S&P500,
+#            MSCI World (URTH), "Starlink/SpaceX" proxy (UFO)
 # ==========================================================
 
-import io
-import os
-import json
-import math
+import io, json, math
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple
 
@@ -21,13 +20,13 @@ import plotly.io as pio
 import matplotlib.pyplot as plt
 
 # ---------- Page / Theme ----------
-st.set_page_config(page_title="ALLADDIN 2.0 — MAXI HEDGEFUND", layout="wide")
+st.set_page_config(page_title="ALLADDIN 2.1 — MAXI HEDGEFUND", layout="wide")
 
 pio.templates["alladdin"] = go.layout.Template(
     layout=go.Layout(
         font=dict(family="Inter, system-ui, Segoe UI, Roboto, sans-serif", size=14),
-        paper_bgcolor="#0e1117",
-        plot_bgcolor="#0e1117",
+        paper_bgcolor="#0c0f14",
+        plot_bgcolor="#0c0f14",
         colorway=["#22d3ee", "#14b8a6", "#f59e0b", "#f43f5e", "#a78bfa", "#60a5fa"],
         xaxis=dict(gridcolor="rgba(255,255,255,0.08)"),
         yaxis=dict(gridcolor="rgba(255,255,255,0.08)"),
@@ -35,63 +34,83 @@ pio.templates["alladdin"] = go.layout.Template(
     )
 )
 pio.templates.default = "alladdin"
-PLOTLY_CFG = {"toImageButtonOptions": {"format":"png","filename":"alladdin_chart","height":450,"width":900,"scale":2}}
+PLOTLY_CFG = {"displaylogo": False, "toImageButtonOptions": {"format":"png","filename":"alladdin_chart","height":450,"width":900,"scale":2}}
 
 CUSTOM_CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
 html, body, [class*="css"] { font-family: 'Inter', system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
 
-/* Background: dark stage + soft radials + subtle grid */
+/* Minimal Neon Background: mesh + grid + glow */
 body {
   background:
     radial-gradient(1200px 600px at 10% -10%, rgba(34,211,238,.08), transparent 60%),
-    radial-gradient(1200px 600px at 110% 10%, rgba(167,139,250,.06), transparent 60%),
+    radial-gradient(1200px 600px at 100% 0%, rgba(167,139,250,.07), transparent 60%),
     radial-gradient(1200px 600px at 50% 120%, rgba(20,184,166,.08), transparent 60%),
     linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01)),
-    #0e1117;
+    #0c0f14;
 }
-:root { --grid-color: rgba(255,255,255,0.04); }
+:root { --grid-color: rgba(255,255,255,0.04); --card: rgba(18,22,30,.8); --border: rgba(255,255,255,.08); }
 .background-grid:before {
-  content:"";
-  position: fixed; inset: 0; pointer-events: none;
+  content:""; position: fixed; inset: 0; pointer-events: none;
   background-image:
     linear-gradient(var(--grid-color) 1px, transparent 1px),
     linear-gradient(90deg, var(--grid-color) 1px, transparent 1px);
-  background-size: 36px 36px, 36px 36px;
+  background-size: 34px 34px, 34px 34px; opacity:.7;
   mask-image: radial-gradient(circle at 50% 40%, rgba(255,255,255,.35), transparent 55%);
 }
 
+/* Layout polish */
 .block-container { padding-top: 0.8rem; padding-bottom: 1.2rem; }
-h1,h2,h3 { letter-spacing:.2px; }
+h1,h2,h3 { letter-spacing:.3px; }
 
-/* KPI cards */
+/* Glass KPI cards with neon glow on hover */
 .kpi-card {
-  background:rgba(22,26,35,.85); border:1px solid rgba(255,255,255,.08);
-  border-radius:14px; padding:16px 18px; box-shadow:0 10px 28px rgba(0,0,0,.28);
+  background: var(--card); border:1px solid var(--border);
+  border-radius:14px; padding:16px 18px; box-shadow:0 12px 30px rgba(0,0,0,.30);
+  transition: box-shadow .25s ease, border-color .25s ease;
 }
-.kpi-big { font-size:2.0rem; font-weight:800; color:#ecfeff; line-height:1.1; }
-.kpi-label { color:#9ca3af; font-size:.92rem; }
-hr { border:none; height:1px; background:linear-gradient(90deg,transparent,rgba(255,255,255,.10),transparent); margin:10px 0 18px; }
-.smallnote { color:#9ca3af; font-size:.9rem; }
+.kpi-card:hover { border-color: rgba(34,211,238,.45); box-shadow: 0 0 0 1px rgba(34,211,238,.25), 0 20px 40px rgba(0,0,0,.35); }
+.kpi-big { font-size:2.0rem; font-weight:800; color:#eaf7ff; line-height:1.1; }
+.kpi-label { color:#95a3b3; font-size:.92rem; }
+hr { border:none; height:1px; background:linear-gradient(90deg,transparent,rgba(255,255,255,.10),transparent); margin:12px 0 18px; }
+.smallnote { color:#93a1b1; font-size:.9rem; }
 
-/* Tables & Buttons */
-.stDataFrame { border:1px solid rgba(255,255,255,.06); border-radius:12px; overflow:hidden; }
+/* DataFrames & Buttons */
+.stDataFrame { border:1px solid var(--border); border-radius:12px; overflow:hidden; }
 .stButton>button { border-radius:10px; }
 
-/* Tabs: sticky */
+/* Tabs: sticky + pill look */
 .stTabs [data-baseweb="tab-list"] { gap: 6px; position: sticky; top: 0; z-index: 10; }
 .stTabs [data-baseweb="tab"] { background: rgba(255,255,255,.06); border-radius: 10px; padding: 8px 12px; }
 .stTabs [aria-selected="true"] { background: rgba(34,211,238,.14); border:1px solid rgba(34,211,238,.35); }
+
+/* Subtle divider */
+.section { border:1px solid var(--border); border-radius:14px; padding:16px; background: var(--card); }
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 st.markdown('<div class="background-grid"></div>', unsafe_allow_html=True)
 
-# ---------- Constants ----------
-CRYPTO_KEYS = ("BTC", "ETH", "SOL", "DOGE", "ADA")
-DEFAULT_TICKERS = ["EURUSD=X", "SPY", "TLT", "GLD", "BTC-USD", "ETH-USD"]
-MORE_CHOICES = DEFAULT_TICKERS + ["QQQ","ACWI","IEF","SLV","GDX","GLDM","XLK","XLF","XLE","UUP","^IRX","^TNX"]
+# ---------- Assets (friendly -> ticker map) ----------
+# Your chosen set, with robust proxies where needed.
+ASSET_MAP: Dict[str, str] = {
+    "BTCUSD": "BTC-USD",
+    "ETHUSD": "ETH-USD",
+    "SOLUSD": "SOL-USD",
+    "Apple": "AAPL",
+    "Tesla": "TSLA",
+    "Gold": "GLD",          # SPDR Gold ETF
+    "NVIDIA": "NVDA",
+    "NASDAQ": "QQQ",        # proxy for Nasdaq-100
+    "S&P 500": "SPY",       # proxy for S&P 500
+    "MSCI World ETF": "URTH",
+    "STARLINK (SPACE X)": "UFO",  # Procure Space ETF (satellite/space economy proxy)
+}
+FRIENDLY_ORDER = list(ASSET_MAP.keys())
+
+# For crypto detection/caps
+CRYPTO_KEYS = ("BTC", "ETH", "SOL", "-USD")
 
 # ---------- Helpers: math/risk ----------
 def to_returns(px: pd.DataFrame, log: bool = False) -> pd.DataFrame:
@@ -101,22 +120,22 @@ def to_returns(px: pd.DataFrame, log: bool = False) -> pd.DataFrame:
 
 def annualize_stats(series: pd.Series, freq: int = 252) -> Tuple[float, float]:
     if series.empty: return 0.0, 0.0
-    mu = float(series.mean()) * freq
+    mu  = float(series.mean()) * freq
     vol = float(series.std(ddof=0)) * math.sqrt(freq)
     return mu, vol
 
 def sharpe_ratio(series: pd.Series, rf: float = 0.0, freq: int = 252) -> float:
     if series.empty: return 0.0
-    excess = series - (rf / freq)
-    vol = float(excess.std(ddof=0))
-    return 0.0 if vol == 0 else float(excess.mean() / vol * math.sqrt(freq))
+    ex  = series - (rf / freq)
+    vol = float(ex.std(ddof=0))
+    return 0.0 if vol == 0 else float(ex.mean() / vol * math.sqrt(freq))
 
 def hist_var_es(series: pd.Series, alpha: float = 0.95) -> Tuple[float, float]:
     s = np.sort(series.dropna().values)
     if s.size == 0: return 0.0, 0.0
     k = max(0, int((1.0 - alpha) * len(s)) - 1)
     var = s[k]
-    es = s[:k+1].mean() if k >= 0 else var
+    es  = s[:k+1].mean() if k >= 0 else var
     return float(var), float(es)
 
 def max_drawdown(cum: pd.Series) -> float:
@@ -145,12 +164,12 @@ def sparkline(series: pd.Series, height=60):
     fig.update_xaxes(visible=False); fig.update_yaxes(visible=False)
     return fig
 
-# ---------- Data: robust loader with light winsorize ----------
+# ---------- Data loader (robust + light winsorize) ----------
 @st.cache_data(show_spinner=False, ttl=300)
 def load_prices(tickers: List[str], years: int = 5) -> pd.DataFrame:
     start = (datetime.today() - timedelta(days=365*years)).strftime("%Y-%m-%d")
     df = yf.download(tickers, start=start, auto_adjust=True, progress=False, group_by="ticker", threads=True)
-    # Normalize columns to single index
+    # Normalize
     if isinstance(df, pd.DataFrame) and "Adj Close" in df.columns:
         px = df["Adj Close"].copy()
     elif isinstance(df, pd.DataFrame) and isinstance(df.columns, pd.MultiIndex):
@@ -162,7 +181,7 @@ def load_prices(tickers: List[str], years: int = 5) -> pd.DataFrame:
         px = px.to_frame()
     px = px.reindex(columns=[t for t in tickers if t in px.columns])
 
-    # Soft outlier fix on extreme single-day % moves > 40%
+    # Soft outlier repair on >40% 1d moves
     pct = px.pct_change()
     bad = pct.abs() > 0.40
     if bad.any().any():
@@ -174,7 +193,6 @@ def load_prices(tickers: List[str], years: int = 5) -> pd.DataFrame:
                 nxt  = px[col].shift(-1).get(t, np.nan)
                 rep = np.nanmean([prev, nxt])
                 if not np.isnan(rep): px.at[t, col] = rep
-
     return px.dropna(how="all")
 
 # ---------- Optimizers ----------
@@ -275,14 +293,13 @@ def apply_crypto_cap(weights: pd.Series, crypto_cap: float) -> pd.Series:
         if w.sum() > 0: w = w / w.sum()
     return w
 
-# ---------- UI: Hero Header ----------
+# ---------- UI Header ----------
 colH1, colH2 = st.columns([0.8, 0.2])
 with colH1:
-    st.title("ALLADDIN 2.0 — MAXI HEDGEFUND")
+    st.title("ALLADDIN 2.1 — MAXI HEDGEFUND")
     st.caption(datetime.now().strftime("%d.%m.%Y %H:%M"))
 with colH2:
-    try: st.image("assets/logo.png")
-    except: pass
+    st.markdown("<div class='section' style='text-align:center;'>🌐<br/>Neon Mode</div>", unsafe_allow_html=True)
 
 # ---------- Sidebar ----------
 st.sidebar.header("Settings")
@@ -294,7 +311,16 @@ with colA:
 with colB:
     preset_toggle = st.checkbox("Use KAYEN preset", value=True)
 
-tickers = st.sidebar.multiselect("Universe (tickers)", options=MORE_CHOICES, default=DEFAULT_TICKERS if preset_toggle else DEFAULT_TICKERS)
+# Only your asset set (friendly names)
+DEFAULT_FRIENDLY = ["BTCUSD","ETHUSD","SOLUSD","Apple","Tesla","Gold","NVIDIA","NASDAQ","S&P 500","MSCI World ETF","STARLINK (SPACE X)"]
+friendly_selection = st.sidebar.multiselect(
+    "Universe (choose from your set)",
+    options=FRIENDLY_ORDER,
+    default=DEFAULT_FRIENDLY if preset_toggle else DEFAULT_FRIENDLY
+)
+# Map to yfinance tickers
+tickers = [ASSET_MAP[x] for x in friendly_selection]
+
 years = st.sidebar.slider("Years of history", 2, 15, value=5)
 min_w = st.sidebar.slider("Min weight per asset", 0.00, 0.20, value=0.00, step=0.01)
 max_w = st.sidebar.slider("Max weight per asset", 0.10, 0.70, value=0.35, step=0.01)
@@ -320,35 +346,13 @@ wf_reb = st.sidebar.selectbox("Backtest rebalance", ["Monthly","Weekly"], index=
 wf_cost_bps = st.sidebar.number_input("Transaction cost (bps per turnover)", 0, 200, value=10, step=5)
 wf_turnover_cap = st.sidebar.slider("Turnover cap per rebalance", 0.05, 1.0, value=0.35, step=0.05)
 
-# Presets: save/load + gallery
-st.sidebar.markdown("**Presets**")
-if st.sidebar.button("Save current preset"):
-    preset = {
-        "tickers": tickers, "years": years, "min_w": min_w, "max_w": max_w,
-        "crypto_cap": crypto_cap, "alpha": alpha, "allow_short": allow_short,
-        "portfolio_value": portfolio_value, "opt_choice": opt_choice,
-        "use_ewma": use_ewma, "wf_reb": wf_reb, "wf_cost_bps": wf_cost_bps,
-        "wf_turnover_cap": wf_turnover_cap, "target_vol": target_vol,
-        "max_leverage": max_leverage, "mom_strength": mom_strength, "mom_lb": mom_lb
-    }
-    st.sidebar.download_button("Download preset.json", data=json.dumps(preset, indent=2).encode(),
-                               file_name="preset.json", mime="application/json")
-uploaded = st.sidebar.file_uploader("Load preset.json", type=["json"])
-if uploaded:
-    try:
-        preset = json.load(uploaded)
-        st.session_state.update(preset)
-        st.sidebar.success("Preset loaded. Bitte Seite neu laden (R).")
-    except Exception as e:
-        st.sidebar.error(f"Preset error: {e}")
-
-st.sidebar.markdown("**Preset Gallery**")
-if st.sidebar.button("💎 Crypto-Only"):
-    st.session_state["tickers"] = ["BTC-USD","ETH-USD","SOL-USD","ADA-USD"]
-if st.sidebar.button("🟢 60/40 Core"):
-    st.session_state["tickers"] = ["SPY","TLT","GLD","IEF"]
-if st.sidebar.button("⚖️ Risk-Parity Core"):
-    st.session_state["tickers"] = ["SPY","TLT","IEF","GLD","UUP"]
+# Note about proxies
+proxy_note = []
+if "NASDAQ" in friendly_selection: proxy_note.append("NASDAQ → QQQ")
+if "MSCI World ETF" in friendly_selection: proxy_note.append("MSCI World → URTH")
+if "STARLINK (SPACE X)" in friendly_selection: proxy_note.append("STARLINK/SpaceX → UFO (satellite ETF)")
+if proxy_note:
+    st.sidebar.caption("Proxies: " + " • ".join(proxy_note))
 
 # ---------- Data ----------
 if len(tickers) == 0:
@@ -358,7 +362,7 @@ if len(tickers) == 0:
 try:
     px = load_prices(tickers, years=years)
     if px.empty:
-        st.error("Keine Preisdaten geladen—prüfe Ticker.")
+        st.error("Keine Preisdaten geladen — prüfe Ticker.")
         st.stop()
     rets = to_returns(px).dropna(how="all")
 except Exception as e:
@@ -369,8 +373,9 @@ except Exception as e:
 dq_missing = float(px.isna().mean().mean())
 dq_min_hist = int(px.notna().sum().min())
 dq_last = px.index.max()
+dq_last_str = dq_last.date().isoformat() if hasattr(dq_last, "date") else str(dq_last)
 if dq_missing > 0.02 or dq_min_hist < 250:
-    st.warning(f"Data Quality: missing={dq_missing:.1%}, min_history={dq_min_hist} Tage. Latest={getattr(dq_last,'date',lambda: dq_last)()}")
+    st.warning(f"Data Quality: missing={dq_missing:.1%}, min_history={dq_min_hist} Tage. Latest={dq_last_str}")
 
 # ---------- Optimize (target) ----------
 regime = regime_tag(rets)
@@ -380,14 +385,14 @@ if opt_choice == "Min-Vol":
     w_opt, opt_label = optimizer_min_vol(px, lb=min_w, ub=max_w, use_ewma=use_ewma_now)
 elif opt_choice == "HRP":
     w_opt, opt_label = optimizer_hrp(px, lb=min_w, ub=max_w)
-else:  # Min-CVaR
+else:
     w_opt, opt_label = optimizer_cvar(rets, alpha=alpha, lb=min_w, ub=max_w, allow_short=allow_short)
 
 w_opt = w_opt.reindex(px.columns).fillna(0.0)
 w_opt = apply_crypto_cap(w_opt, crypto_cap)
 if w_opt.sum() > 0: w_opt = w_opt / w_opt.sum()
 
-# Momentum Tilt (alpha layer)
+# Momentum Tilt
 lb_map = {"6M":126, "9M":189, "12M":252}
 lb = lb_map[mom_lb]
 mom = (px/px.shift(lb) - 1.0).iloc[-1].reindex(w_opt.index).fillna(0.0)
@@ -395,7 +400,7 @@ mom_score = (mom.rank(pct=True) - 0.5)  # centered
 w_tilt = w_opt * (1 + mom_strength * mom_score)
 if w_tilt.sum() > 0: w_opt = (w_tilt / w_tilt.sum()).fillna(0.0)
 
-# ---------- Portfolio series & risk (pre- and post-scale) ----------
+# ---------- Portfolio series & risk (post-scale) ----------
 port = (rets.fillna(0.0) @ w_opt.values).rename("Portfolio")
 cum  = (1.0 + port).cumprod()
 ann_ret, ann_vol = annualize_stats(port)
@@ -403,18 +408,17 @@ sr = sharpe_ratio(port)
 VaR, ES = hist_var_es(port, alpha=alpha)
 MDD = max_drawdown(cum)
 
-# Risk targeting (live series scaled)
+# Risk targeting
 eps = 1e-8
 scale_live = min(max_leverage, (target_vol / max(eps, ann_vol)))
 port_eff = port * scale_live
 cum_eff  = (1.0 + port_eff).cumprod()
 ann_ret_eff, ann_vol_eff = annualize_stats(port_eff)
-sr_eff = sharpe_ratio(port_eff)
+sr_eff  = sharpe_ratio(port_eff)
 VaR_eff, ES_eff = hist_var_es(port_eff, alpha=alpha)
 MDD_eff = max_drawdown(cum_eff)
 
 roll_sharpe = port_eff.rolling(60).apply(lambda x: 0.0 if np.std(x)==0 else (np.mean(x)/np.std(x))*np.sqrt(252), raw=True)
-roll_dd = (cum_eff/cum_eff.cummax()-1.0)
 
 # ---------- Tabs ----------
 tab_overview, tab_risk, tab_backtest, tab_factors, tab_stress, tab_trades, tab_ai, tab_report = st.tabs(
@@ -438,18 +442,22 @@ with tab_overview:
     with d: kpi("Max Drawdown", f"{MDD_eff:.2%}")
     st.caption(f"Optimizer: {opt_label} · Crypto Cap: {crypto_cap:.0%} · Regime: {regime} · Leverage: {scale_live:.2f}×")
 
-    # KPI sparklines
+    # mini sparklines row
     sa, sb, sc, sd = st.columns(4)
-    with sa: st.plotly_chart(sparkline((1+port_eff).cumprod().pct_change().fillna(0).rolling(20).mean()), use_container_width=True, config={"displayModeBar": False})
+    with sa: st.plotly_chart(sparkline((1+port_eff).cumprod()), use_container_width=True, config={"displayModeBar": False})
     with sb: st.plotly_chart(sparkline(roll_sharpe.fillna(0)), use_container_width=True, config={"displayModeBar": False})
-    with sc: st.plotly_chart(sparkline((cum_eff/cum_eff.cummax()-1).fillna(0)), use_container_width=True, config={"displayModeBar": False})
+    with sc: st.plotly_chart(sparkline((cum_eff/cum_eff.cummax()-1.0).fillna(0)), use_container_width=True, config={"displayModeBar": False})
     with sd: st.plotly_chart(sparkline(rets.mean(axis=1).rolling(20).mean().fillna(0)), use_container_width=True, config={"displayModeBar": False})
 
+    st.markdown("<div class='section'>", unsafe_allow_html=True)
     L, R = st.columns([1.25, 1.0])
     with L:
         st.subheader("Portfolio Overview (target)")
         ytd = {t: rets[t].loc[rets.index.year == rets.index[-1].year].sum() if t in rets.columns else 0.0 for t in px.columns}
         df_over = pd.DataFrame({"Weight": w_opt.round(4), "YTD Return": pd.Series(ytd).round(4)})
+        # Show friendly names if possible
+        fr_names = {ASSET_MAP[k]:k for k in ASSET_MAP}
+        df_over.index = [fr_names.get(idx, idx) for idx in df_over.index]
         st.dataframe(df_over, use_container_width=True)
     with R:
         st.subheader("Risk Metrics (post-scale)")
@@ -463,13 +471,14 @@ with tab_overview:
             "Leverage (×)": [scale_live],
         }).round(4)
         st.dataframe(df_risk, use_container_width=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
     st.subheader("Correlation Heatmap")
     fig, ax = plt.subplots()
     corr = rets.corr()
     im = ax.imshow(corr.values, cmap="viridis", vmin=-1, vmax=1)
-    ax.set_xticks(range(len(corr.columns))); ax.set_xticklabels(corr.columns, rotation=45, ha="right")
-    ax.set_yticks(range(len(corr.index)));   ax.set_yticklabels(corr.index)
+    ax.set_xticks(range(len(corr.columns))); ax.set_xticklabels([fr_names.get(c,c) for c in corr.columns], rotation=45, ha="right")
+    ax.set_yticks(range(len(corr.index)));   ax.set_yticklabels([fr_names.get(c,c) for c in corr.index])
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     fig.tight_layout()
     st.pyplot(fig)
@@ -500,7 +509,7 @@ with tab_risk:
     except Exception as e:
         st.warning(f"Monte Carlo nicht verfügbar: {e}")
 
-# ---------- Backtest (Walk-Forward, with risk targeting) ----------
+# ---------- Backtest (Walk-Forward with risk targeting) ----------
 def monthly_dates(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
     g = pd.Series(index=index, data=True)
     return g.groupby([index.year, index.month]).head(1).index
@@ -555,14 +564,17 @@ with tab_backtest:
     bt_years = st.slider("Backtest years", 2, 15, value=min(5, years), key="bt_years")
     px_bt = load_prices(tickers, years=bt_years)
     rets_bt = to_returns(px_bt).dropna()
-
+    rebal_dates = monthly_dates(rets_bt.index) if st.session_state.get("wf_reb_sel", "Monthly") == "Monthly" else weekly_dates(rets_bt.index)
+    # ensure selection sync
+    st.session_state["wf_reb_sel"] = wf_reb
     rebal_dates = monthly_dates(rets_bt.index) if wf_reb == "Monthly" else weekly_dates(rets_bt.index)
+
     eq = rebalance_backtest(px_bt, rets_bt, rebal_dates, lb=min_w, ub=max_w, crypto_cap=crypto_cap,
                             cost_bps=wf_cost_bps, turnover_cap=wf_turnover_cap,
                             opt_choice=opt_choice, use_ewma=use_ewma_now, alpha=alpha, allow_short=allow_short,
                             target_vol=target_vol, max_leverage=max_leverage)
 
-    bench_ticker = st.selectbox("Benchmark", ["SPY","ACWI","QQQ","IEF","GLD"], index=0, key="bench")
+    bench_ticker = st.selectbox("Benchmark", ["SPY","QQQ","URTH","GLD"], index=0, key="bench")
     bench_px = yf.download(bench_ticker, period=f"{bt_years}y", auto_adjust=True, progress=False)["Close"].dropna()
     common = eq.index.intersection(bench_px.index)
     bench_eq = bench_px.loc[common] / bench_px.loc[common].iloc[0]
@@ -596,46 +608,30 @@ with tab_backtest:
 # ---------- Factors ----------
 with tab_factors:
     st.subheader("Factor Attribution (Daily Returns Regression)")
-
-    # Einfache Makro-Faktoren
-    factor_map = {
-        "Stocks (SPY)": "SPY",
-        "Bonds (IEF)": "IEF",
-        "Gold (GLD)": "GLD",
-        "USD (UUP proxy)": "UUP",
-    }
-    fac_tickers = list(factor_map.values())
-
-    # Faktorpreise & Faktorreturns laden
-    fac_px = load_prices(fac_tickers, years=min(years, 5))
+    factor_map = {"Stocks (SPY)": "SPY", "Bonds (IEF)": "IEF", "Gold (GLD)": "GLD", "USD (UUP proxy)": "UUP"}
+    fac_px = load_prices(list(factor_map.values()), years=min(5, years))
     fac_rets = to_returns(fac_px)
 
-    # Zielvariable: portfolio returns (post-scale / vol-targeted)
     port_eff = port * scale_live
     y = port_eff.reindex(fac_rets.index).dropna()
-
-    # Regressoren: Faktorreturns (auf y-Index)
     X = fac_rets.reindex(y.index).fillna(0.0).copy()
     X.columns = list(factor_map.keys())
 
-    # OLS mit statsmodels (falls vorhanden), sonst Fallback mit numpy
-    beta = {}
-    r2 = 0.0
+    beta = {}; r2 = 0.0
     try:
         import statsmodels.api as sm
         X_ = sm.add_constant(X)
         model = sm.OLS(y.values, X_.values).fit()
         r2 = float(model.rsquared)
         coefs = dict(zip(["Const"] + list(X.columns), model.params))
-        for k in X.columns:
-            beta[k] = float(coefs.get(k, 0.0))
+        for k in X.columns: beta[k] = float(coefs.get(k, 0.0))
     except Exception:
         X_ = np.column_stack([np.ones(len(X)), X.values])
         coef, *_ = np.linalg.lstsq(X_, y.values, rcond=None)
         pred = X_ @ coef
-        ss_res = np.sum((y.values - pred) ** 2)
-        ss_tot = np.sum((y.values - y.values.mean()) ** 2)
-        r2 = 0.0 if ss_tot == 0 else 1 - ss_res / ss_tot
+        ss_res = np.sum((y.values - pred)**2)
+        ss_tot = np.sum((y.values - y.values.mean())**2)
+        r2 = 0.0 if ss_tot==0 else 1 - ss_res/ss_tot
         for i, k in enumerate(X.columns, start=1):
             beta[k] = float(coef[i])
 
@@ -646,14 +642,13 @@ with tab_factors:
 # ---------- Stress Testing ----------
 with tab_stress:
     st.subheader("Instant Stress Test")
-    st.caption("Simuliere 1-Tages-Schocks. P&L wird auf die post-scale Serie (Vol-Target) bezogen.")
+    st.caption("Simuliere 1-Tages-Schocks. P&L bezieht sich auf die post-scale Serie (Vol-Target).")
 
-    # Beispiel-Szenarien
     scenario_lib = {
-        "Tech + Crypto Crash": {"AAPL": -0.15, "MSFT": -0.15, "SPY": -0.12, "BTC-USD": -0.25, "ETH-USD": -0.35},
-        "Rates Spike": {"TLT": -0.08, "SPY": -0.04},
-        "USD Surge": {"EURUSD=X": -0.02, "GLD": -0.03, "SPY": -0.03},
-        "Crypto Winter": {"BTC-USD": -0.30, "ETH-USD": -0.40},
+        "Tech + Crypto Crash": {"AAPL": -0.15, "TSLA": -0.18, "QQQ": -0.12, "BTC-USD": -0.25, "ETH-USD": -0.35},
+        "Rates Spike": {"URTH": -0.05, "SPY": -0.04, "GLD": -0.03},
+        "USD Surge": {"GLD": -0.03, "SPY": -0.03},
+        "Crypto Winter": {"BTC-USD": -0.30, "ETH-USD": -0.40, "SOL-USD": -0.45},
     }
 
     scn = st.selectbox("Scenario", list(scenario_lib.keys()), index=0)
@@ -661,16 +656,13 @@ with tab_stress:
     shock_pct = st.slider("Shock size (manual, %)", -40, 40, -5, step=1)
 
     left, right = st.columns(2)
-
     with left:
         if st.button("Apply Scenario"):
             shock = pd.Series(0.0, index=px.columns, dtype=float)
             for k, v in scenario_lib[scn].items():
-                if k in shock.index:
-                    shock.loc[k] = v
+                if k in shock.index: shock.loc[k] = v
             pnl = float((w_opt * shock).sum()) * float(scale_live)
             st.success(f"[{scn}] Estimated instant P&L (post-scale): **{pnl:.2%}**")
-
     with right:
         if st.button("Apply Manual Shock"):
             if not pick:
@@ -699,8 +691,16 @@ with tab_trades:
     last_prices = px.iloc[-1].reindex(w_opt.index).fillna(0.0)
     notional = (delta * float(portfolio_value)).rename("Trade Notional (EUR)")
 
-    plan = pd.concat([current.rename("Current"), w_opt.rename("Target"),
-                      delta, last_prices.rename("Last Price"), notional], axis=1).round(6)
+    # Friendly index for display
+    fr_names = {ASSET_MAP[k]:k for k in ASSET_MAP}
+    plan = pd.concat([
+        current.rename("Current"),
+        w_opt.rename("Target"),
+        delta,
+        last_prices.rename("Last Price"),
+        notional
+    ], axis=1).round(6)
+    plan.index = [fr_names.get(idx, idx) for idx in plan.index]
     st.dataframe(plan, use_container_width=True)
 
     buf = io.BytesIO()
@@ -708,33 +708,27 @@ with tab_trades:
     st.download_button("Download Rebalance Plan (CSV)", data=buf.getvalue(),
                        file_name="rebalance_plan.csv", mime="text/csv")
 
-# ---------- AI Insights (lightweight KI-Layer) ----------
+# ---------- AI Insights (light) ----------
 with tab_ai:
     st.subheader("AI Insights (Explain & Suggest)")
-    # Simple rule-based narrative + optional sklearn clustering
     notes = []
 
-    # Exposures
     crypto_assets = [c for c in w_opt.index if any(k in c for k in CRYPTO_KEYS)]
     crypto_exp = float(w_opt.loc[crypto_assets].clip(lower=0).sum()) if crypto_assets else 0.0
     top_w = w_opt.sort_values(ascending=False).head(3)
-    notes.append(f"Top Weights: {', '.join([f'{k} {v:.0%}' for k,v in top_w.items()])}.")
+    notes.append("Top Weights: " + ", ".join([f"{c} {v:.0%}" for c,v in top_w.items()]) + ".")
     notes.append(f"Crypto Exposure: {crypto_exp:.0%} (Cap {crypto_cap:.0%}).")
-
-    # Regime & risk
-    notes.append(f"Regime detected: **{regime}**; using {('EWMA cov' if use_ewma_now else 'Ledoit-Wolf')} for risk.")
-    notes.append(f"Post-scale Vol target: {target_vol:.0%}, leverage in live series: {scale_live:.2f}×.")
+    notes.append(f"Regime detected: **{regime}**; risk model: {('EWMA' if use_ewma_now else 'Ledoit-Wolf')}.")
+    notes.append(f"Vol target {target_vol:.0%} → live leverage: {scale_live:.2f}×.")
     notes.append(f"Risk snapshot → VaR1d: {VaR_eff:.2%}, ES1d: {ES_eff:.2%}, MaxDD: {MDD_eff:.2%}.")
 
-    # Suggestions (simple rules)
     if crypto_exp > crypto_cap + 1e-6:
         notes.append("🔧 Reduce crypto weights to respect cap.")
     if MDD_eff < -0.25:
-        notes.append("🛡 Consider lowering target vol or hedging (e.g., bonds/GLD) – drawdown heavy.")
+        notes.append("🛡 Drawdown heavy: lower target vol or add hedges (GLD/URTH/long bonds).")
     if sr_eff < 0.6 and ann_vol_eff > target_vol * 0.9:
-        notes.append("⚖️ Low Sharpe with high vol: review optimizer (try HRP or Min-CVaR) and momentum tilt.")
+        notes.append("⚖️ Low Sharpe w/ high vol → try HRP or Min-CVaR + tune momentum tilt.")
 
-    # Optional sklearn clustering on realized volatility (last 90d)
     try:
         from sklearn.cluster import KMeans
         feat = pd.DataFrame({
@@ -745,23 +739,26 @@ with tab_ai:
         cl = km.labels_
         high_idx = np.argmax([feat.values[cl==i,0].mean() for i in [0,1]])
         high_cluster_members = feat.index[cl==high_idx].tolist()
-        notes.append(f"🤖 ML Regime (assets): High-vol cluster: {', '.join(high_cluster_members[:6])}{'…' if len(high_cluster_members)>6 else ''}.")
+        notes.append("🤖 ML Regime: High-vol cluster → " + ", ".join(high_cluster_members[:6]) + ("…" if len(high_cluster_members)>6 else ""))
     except Exception:
         notes.append("🤖 ML Regime: (optional) install scikit-learn for clustering insights.")
 
     st.write("\n\n".join(f"- {m}" for m in notes))
 
-# ---------- Report (HTML export) ----------
+# ---------- Report ----------
 with tab_report:
     st.subheader("One-Click HTML Report")
+    fr_names = {ASSET_MAP[k]:k for k in ASSET_MAP}
+    weights_named = {fr_names.get(k,k): float(v) for k,v in w_opt.round(4).to_dict().items()}
     html = f"""
-    <html><head><meta charset="utf-8"><title>ALLADDIN 2.0 Report</title></head>
-    <body style="font-family:Inter,system-ui,sans-serif;background:#0e1117;color:#e5e7eb;">
-      <h2>ALLADDIN 2.0 — Summary ({datetime.now().strftime('%Y-%m-%d %H:%M')})</h2>
-      <p><b>Universe:</b> {', '.join(tickers)}</p>
+    <html><head><meta charset="utf-8"><title>ALLADDIN 2.1 Report</title></head>
+    <body style="font-family:Inter,system-ui,sans-serif;background:#0c0f14;color:#e5e7eb;">
+      <h2>ALLADDIN 2.1 — Summary ({datetime.now().strftime('%Y-%m-%d %H:%M')})</h2>
+      <p><b>Universe:</b> {', '.join(friendly_selection)}</p>
+      <p><b>Proxies:</b> {'; '.join(proxy_note) if proxy_note else '—'}</p>
       <p><b>Optimizer:</b> {opt_label} | <b>Regime:</b> {regime} | <b>Crypto cap:</b> {crypto_cap:.0%} | <b>Leverage:</b> {scale_live:.2f}×</p>
       <h3>Weights</h3>
-      <pre>{json.dumps({k: float(v) for k,v in w_opt.round(4).to_dict().items()}, indent=2)}</pre>
+      <pre>{json.dumps(weights_named, indent=2)}</pre>
       <h3>Key Metrics (post-scale)</h3>
       <ul>
         <li>Annualized Return: {ann_ret_eff:.2%}</li>
@@ -771,7 +768,7 @@ with tab_report:
         <li>CVaR({int(alpha*100)}%) ~ {ES_eff:.2%}</li>
         <li>Max Drawdown: {MDD_eff:.2%}</li>
       </ul>
-      <p class="smallnote">Hinweis: HRP und Min-CVaR benötigen optionale Libraries; bei Fehlen wird ein robustes Fallback genutzt. Target-Vol wurde auf die Live-Serie angewendet.</p>
+      <p style="color:#94a3b8;">Hinweis: Einige Assets sind über liquide ETFs proxied (QQQ, URTH, UFO).</p>
     </body></html>
     """
     st.download_button("Download HTML Report", data=html.encode("utf-8"),
