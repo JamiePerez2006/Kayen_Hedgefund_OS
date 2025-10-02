@@ -1,5 +1,5 @@
 # ==========================================================
-# ALLADDIN 3.0 — MAXI HEDGEFUND (Single-file Streamlit App)
+# ALADDIN 3.0 — MAXI HEDGEFUND (Single-file Streamlit App)
 # Minimal Neon UI • Multi-Optimizer • Black-Litterman (cost-aware)
 # Walk-Forward (TC/Liquidity) • EWMA/Regime • Target-Vol/Lev
 # Momentum Tilt • Purged K-Fold CV • Deflated Sharpe
@@ -25,9 +25,9 @@ import matplotlib.pyplot as plt
 warnings.filterwarnings("ignore")
 
 # ---------- Page / Theme ----------
-st.set_page_config(page_title="ALLADDIN 3.0 — MAXI HEDGEFUND", layout="wide")
+st.set_page_config(page_title="ALADDIN 3.0 — MAXI HEDGEFUND", layout="wide")
 
-pio.templates["alladdin"] = go.layout.Template(
+pio.templates["aladdin"] = go.layout.Template(
     layout=go.Layout(
         font=dict(family="Inter, system-ui, Segoe UI, Roboto, sans-serif", size=14),
         paper_bgcolor="#0c0f14",
@@ -38,8 +38,17 @@ pio.templates["alladdin"] = go.layout.Template(
         legend=dict(bgcolor="rgba(0,0,0,0)")
     )
 )
-pio.templates.default = "alladdin"
-PLOTLY_CFG = {"displaylogo": False, "toImageButtonOptions": {"format":"png","filename":"alladdin_chart","height":450,"width":900,"scale":2}}
+pio.templates.default = "aladdin"
+PLOTLY_CFG = {
+    "displaylogo": False,
+    "toImageButtonOptions": {
+        "format":"png",
+        "filename":"aladdin_chart",
+        "height":450,
+        "width":900,
+        "scale":2
+    }
+}
 
 CUSTOM_CSS = """
 <style>
@@ -162,7 +171,7 @@ def regime_tag(returns: pd.DataFrame, lookback: int = 21, thr: float = 0.02) -> 
 
 def sparkline(series: pd.Series, height=60):
     fig = go.Figure(go.Scatter(x=series.index, y=series.values, mode="lines"))
-    fig.update_layout(margin=dict(l=0,r=0,t=0,b=0), height=height, template="alladdin")
+    fig.update_layout(margin=dict(l=0,r=0,t=0,b=0), height=height, template="aladdin")
     fig.update_xaxes(visible=False); fig.update_yaxes(visible=False)
     return fig
 
@@ -387,7 +396,7 @@ def apply_crypto_cap(weights: pd.Series, crypto_cap: float) -> pd.Series:
 # ---------- UI Header ----------
 colH1, colH2 = st.columns([0.8, 0.2])
 with colH1:
-    st.title("ALLADDIN 3.0 — MAXI HEDGEFUND")
+    st.title("ALADDIN 3.0 — MAXI HEDGEFUND")
     st.caption(datetime.now().strftime("%d.%m.%Y %H:%M"))
 with colH2:
     st.markdown("<div class='section' style='text-align:center;'>🌐<br/>Neon Mode</div>", unsafe_allow_html=True)
@@ -735,7 +744,7 @@ with tab_backtest:
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=common, y=port_eq.values,  name="Portfolio", mode="lines"))
     fig.add_trace(go.Scatter(x=common, y=bench_eq.values, name=bench_ticker, mode="lines"))
-    fig.update_layout(title="Index (Start=1.0)", xaxis_title="Date", yaxis_title="Index", height=420, template="alladdin")
+    fig.update_layout(title="Index (Start=1.0)", xaxis_title="Date", yaxis_title="Index", height=420, template="aladdin")
     st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CFG)
 
     bt_ret = eq.pct_change().dropna()
@@ -1009,9 +1018,9 @@ with tab_report:
     if "URTH" in tickers: proxy_note.append("MSCI World → URTH")
     if "UFO"  in tickers: proxy_note.append("STARLINK/SpaceX → UFO (space economy ETF)")
     html = f"""
-    <html><head><meta charset="utf-8"><title>ALLADDIN 3.0 Report</title></head>
+    <html><head><meta charset="utf-8"><title>ALADDIN 3.0 Report</title></head>
     <body style="font-family:Inter,system-ui,sans-serif;background:#0c0f14;color:#e5e7eb;">
-      <h2>ALLADDIN 3.0 — Summary ({datetime.now().strftime('%Y-%m-%d %H:%M')})</h2>
+      <h2>ALADDIN 3.0 — Summary ({datetime.now().strftime('%Y-%m-%d %H:%M')})</h2>
       <p><b>Universe:</b> {', '.join(friendly_selection)}</p>
       <p><b>Proxies:</b> {'; '.join(proxy_note) if proxy_note else '—'}</p>
       <p><b>Optimizer:</b> {opt_label} | <b>Regime:</b> {regime} | <b>Crypto cap:</b> {crypto_cap:.0%} | <b>Leverage:</b> {scale_live:.2f}×</p>
@@ -1030,5 +1039,5 @@ with tab_report:
     </body></html>
     """
     st.download_button("Download HTML Report", data=html.encode("utf-8"),
-                       file_name="alladdin_report.html", mime="text/html")
+                       file_name="aladdin_report.html", mime="text/html")
 # ================== END ==================
