@@ -1,11 +1,16 @@
 # ==========================================================
-# Alladdin 2.0 — MAXI HEDGEFUND (Single-file Streamlit App)
-# Premium Look • Robust Backtest • Risk • Factors • Stress • Report
+# ALLADDIN 2.0 — MAXI HEDGEFUND (Single-file Streamlit App)
+# Premium Look • Multi-Optimizer • Walk-Forward BT • EWMA/Regime
+# Stress • Monte-Carlo • Rebalance Planner • Presets • Reports
 # ==========================================================
 
 import io
+import os
+import json
 import math
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -16,7 +21,7 @@ import plotly.io as pio
 import matplotlib.pyplot as plt
 
 # ---------- Page / Theme ----------
-st.set_page_config(page_title="Alladdin 2.0 — MAXI HEDGEFUND", layout="wide")
+st.set_page_config(page_title="ALLADDIN 2.0 — MAXI HEDGEFUND", layout="wide")
 
 pio.templates["alladdin"] = go.layout.Template(
     layout=go.Layout(
@@ -35,171 +40,257 @@ CUSTOM_CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
 html, body, [class*="css"] { font-family: 'Inter', system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
-.block-container { padding-top: 1.0rem; padding-bottom: 1.4rem; }
+.block-container { padding-top: 0.8rem; padding-bottom: 1.2rem; }
 h1,h2,h3 { letter-spacing:.2px; }
-.kpi-card { background:rgba(22,26,35,.80); border:1px solid rgba(255,255,255,.06);
+.kpi-card { background:rgba(22,26,35,.85); border:1px solid rgba(255,255,255,.06);
   border-radius:14px; padding:16px 18px; box-shadow:0 10px 28px rgba(0,0,0,.28); }
 .kpi-big { font-size:2.0rem; font-weight:800; color:#ecfeff; line-height:1.1; }
 .kpi-label { color:#9ca3af; font-size:.92rem; }
-hr { border:none; height:1px; background:linear-gradient(90deg,transparent,rgba(255,255,255,.10),transparent); }
+hr { border:none; height:1px; background:linear-gradient(90deg,transparent,rgba(255,255,255,.10),transparent); margin:10px 0 18px; }
 .smallnote { color:#9ca3af; font-size:.9rem; }
 .stDataFrame { border:1px solid rgba(255,255,255,.06); border-radius:12px; overflow:hidden; }
 .stButton>button { border-radius:10px; }
+.stTabs [data-baseweb="tab-list"] { gap: 6px; }
+.stTabs [data-baseweb="tab"] { background: rgba(255,255,255,.06); border-radius: 10px; padding: 8px 12px; }
+.stTabs [aria-selected="true"] { background: rgba(34,211,238,.14); border:1px solid rgba(34,211,238,.35); }
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 # ---------- Constants ----------
 CRYPTO_KEYS = ("BTC", "ETH", "SOL", "DOGE", "ADA")
+DEFAULT_TICKERS = ["EURUSD=X", "SPY", "TLT", "GLD", "BTC-USD", "ETH-USD"]
+MORE_CHOICES = DEFAULT_TICKERS + ["QQQ","ACWI","IEF","SLV","GDX","GLDM","XLK","XLF","XLE","UUP","^IRX","^TNX"]
 
-# ---------- Helpers ----------
-@st.cache_data(show_spinner=False, ttl=300)
-def load_prices(tickers, years=5):
-    """Download Adjusted Close; always return DataFrame with columns=tickers."""
-    period = f"{years}y"
-    data = yf.download(
-        tickers, period=period, auto_adjust=True, progress=False,
-        group_by="ticker", threads=True
-    )
-
-    # Normalize to single-level columns
-    if isinstance(data, pd.DataFrame) and "Adj Close" in data.columns:
-        px = data["Adj Close"].copy()
-    elif isinstance(data, pd.DataFrame) and isinstance(data.columns, pd.MultiIndex):
-        lvl1 = data.columns.get_level_values(1)
-        px = data.xs("Adj Close", axis=1, level=1) if "Adj Close" in lvl1 else data.xs("Close", axis=1, level=1)
-    else:
-        px = data if isinstance(data, pd.DataFrame) else data.to_frame()
-
-    if isinstance(px, pd.Series):
-        px = px.to_frame()
-
-    cols = [t for t in tickers if t in px.columns]
-    px = px.reindex(columns=cols).dropna(how="all")
-    return px
-
-def to_returns(px, log=False):
+# ---------- Helpers: math/risk ----------
+def to_returns(px: pd.DataFrame, log: bool = False) -> pd.DataFrame:
     px = px.sort_index()
     rets = np.log(px/px.shift(1)) if log else px.pct_change()
-    return rets.dropna(how="all")
+    return rets.dropna(how="all").fillna(0.0)
 
-def annualize_stats(series, freq=252):
-    if len(series) == 0: return 0.0, 0.0
-    mu  = float(series.mean()) * freq
-    vol = float(series.std()) * math.sqrt(freq)
+def annualize_stats(series: pd.Series, freq: int = 252) -> Tuple[float, float]:
+    if series.empty: return 0.0, 0.0
+    mu = float(series.mean()) * freq
+    vol = float(series.std(ddof=0)) * math.sqrt(freq)
     return mu, vol
 
-def sharpe_ratio(series, rf=0.0, freq=252):
-    mu, vol = annualize_stats(series - rf/freq, freq=freq)
-    return 0.0 if vol == 0 else mu/vol
+def sharpe_ratio(series: pd.Series, rf: float = 0.0, freq: int = 252) -> float:
+    if series.empty: return 0.0
+    excess = series - (rf / freq)
+    vol = float(excess.std(ddof=0))
+    return 0.0 if vol == 0 else float(excess.mean() / vol * math.sqrt(freq))
 
-def hist_var_es(series, alpha=0.95):
-    s = series.dropna().values
+def hist_var_es(series: pd.Series, alpha: float = 0.95) -> Tuple[float, float]:
+    s = np.sort(series.dropna().values)
     if s.size == 0: return 0.0, 0.0
-    s = np.sort(s)
-    k = int((1.0 - alpha) * len(s))
-    k = max(0, min(len(s)-1, k))
+    k = max(0, int((1.0 - alpha) * len(s)) - 1)
     var = s[k]
-    es  = s[:k+1].mean() if k >= 0 else var
+    es = s[:k+1].mean() if k >= 0 else var
     return float(var), float(es)
 
-def max_drawdown(cum):
-    if len(cum) == 0: return 0.0
+def max_drawdown(cum: pd.Series) -> float:
+    if cum.empty: return 0.0
     dd = (cum / cum.cummax()) - 1.0
     return float(dd.min())
 
-def try_min_vol_weights(px_hist, min_w=0.0, max_w=0.35):
-    """
-    Try PyPortfolioOpt min volatility; fallback to heuristic.
-    Returns (weights: pd.Series, used_optimizer: bool)
-    """
-    try:
-        from pypfopt.risk_models import CovarianceShrinkage
-        from pypfopt.expected_returns import mean_historical_return
-        from pypfopt.efficient_frontier import EfficientFrontier
+def ewma_cov(returns: pd.DataFrame, lam: float = 0.94) -> pd.DataFrame:
+    X = returns.fillna(0.0).values
+    n, k = X.shape
+    seed = min(252, max(60, n//4))
+    S = np.cov(X[:seed].T) if n >= seed else np.eye(k)
+    for t in range(seed, n):
+        x = X[t].reshape(-1,1)
+        S = lam * S + (1 - lam) * (x @ x.T)
+    return pd.DataFrame(S, index=returns.columns, columns=returns.columns)
 
-        mu = mean_historical_return(px_hist)
-        S  = CovarianceShrinkage(px_hist).ledoit_wolf()
-        ef = EfficientFrontier(mu, S, weight_bounds=(min_w, max_w))
-        w  = pd.Series(ef.min_volatility(), dtype=float)
-        w.index = pd.Index(w.index, dtype=str)
-        w = w.fillna(0.0)
-        if abs(w.sum() - 1.0) > 1e-9:
-            w /= w.sum()
-        return w, True
-    except Exception:
-        return min_vol_heuristic(px_hist, min_w=min_w, max_w=max_w), False
+def regime_tag(returns: pd.DataFrame, lookback: int = 21, thr: float = 0.02) -> str:
+    if returns.empty: return "unknown"
+    vol = returns.rolling(lookback).std().dropna().iloc[-1].mean()
+    return "high-vol" if vol > thr else "normal"
 
-def _project_to_simplex_with_bounds(w, min_w, max_w):
-    w = np.clip(w, min_w, max_w)
+# ---------- Data: robust loader with cache & light winsorize ----------
+@st.cache_data(show_spinner=False, ttl=300)
+def load_prices(tickers: List[str], years: int = 5) -> pd.DataFrame:
+    start = (datetime.today() - timedelta(days=365*years)).strftime("%Y-%m-%d")
+    df = yf.download(tickers, start=start, auto_adjust=True, progress=False, group_by="ticker", threads=True)
+    # Normalize columns to single index
+    if isinstance(df, pd.DataFrame) and "Adj Close" in df.columns:
+        px = df["Adj Close"].copy()
+    elif isinstance(df, pd.DataFrame) and isinstance(df.columns, pd.MultiIndex):
+        lvl1 = df.columns.get_level_values(1)
+        px = df.xs("Adj Close", axis=1, level=1) if "Adj Close" in lvl1 else df.xs("Close", axis=1, level=1)
+    else:
+        px = df if isinstance(df, pd.DataFrame) else df.to_frame()
+    if isinstance(px, pd.Series):
+        px = px.to_frame()
+    # Keep requested columns order
+    px = px.reindex(columns=[t for t in tickers if t in px.columns])
+    # Light outlier fix on extreme single-day % moves > 40%
+    pct = px.pct_change()
+    bad = pct.abs() > 0.40
+    if bad.any().any():
+        px = px.copy()
+        for col in px.columns:
+            idx = bad[col][bad[col]].index
+            for t in idx:
+                prev = px[col].shift(1).get(t, np.nan)
+                nxt = px[col].shift(-1).get(t, np.nan)
+                rep = np.nanmean([prev, nxt])
+                if not np.isnan(rep): px.at[t, col] = rep
+    return px.dropna(how="all")
+
+# ---------- Optimizers ----------
+def _project_to_simplex_with_bounds(w: np.ndarray, lb: float, ub: float) -> np.ndarray:
+    w = np.clip(w, lb, ub)
     s = w.sum()
     if s <= 0:
         w[:] = 1.0 / len(w)
     else:
-        w /= s
-        w = np.clip(w, min_w, max_w)
-        w /= w.sum()
+        w = w / s
+        w = np.clip(w, lb, ub)
+        w = w / w.sum()
     return w
 
-def min_vol_heuristic(px_hist, min_w=0.0, max_w=0.35):
-    """Inverse-Varianz Heuristik, robust & schnell (keine Solver)."""
-    px_hist = px_hist.dropna()
+def inverse_variance_weights(px_hist: pd.DataFrame, lb: float, ub: float) -> pd.Series:
     n = px_hist.shape[1]
-    if n == 0:
-        return pd.Series(dtype=float)
+    if n == 0: return pd.Series(dtype=float)
     if px_hist.shape[0] < 40:
         return pd.Series(np.ones(n)/n, index=px_hist.columns, dtype=float)
     rets = to_returns(px_hist)
     var = rets.var().replace([np.inf, -np.inf], np.nan).fillna(1.0)
-    iv  = 1.0 / (var + 1e-12)
-    w   = iv.values
-    w   = _project_to_simplex_with_bounds(w, min_w, max_w)
+    iv = 1.0 / (var + 1e-12)
+    w = _project_to_simplex_with_bounds(iv.values, lb, ub)
     return pd.Series(w, index=px_hist.columns, dtype=float)
 
-def apply_crypto_cap(weights: pd.Series, crypto_cap: float):
-    """Kappt Summe der Krypto-Gewichte und renormalisiert den Rest."""
+def optimizer_min_vol(px_hist: pd.DataFrame, lb: float, ub: float, use_ewma: bool) -> Tuple[pd.Series, str]:
+    # Try PyPortfolioOpt; fall back to inverse-variance
+    try:
+        from pypfopt.expected_returns import mean_historical_return
+        from pypfopt.efficient_frontier import EfficientFrontier
+        if use_ewma:
+            S = ewma_cov(to_returns(px_hist), lam=0.94)
+        else:
+            from pypfopt.risk_models import CovarianceShrinkage
+            S = CovarianceShrinkage(px_hist).ledoit_wolf()
+        mu = mean_historical_return(px_hist)
+        ef = EfficientFrontier(mu, S, weight_bounds=(lb, ub))
+        w = pd.Series(ef.min_volatility())
+        w.index = pd.Index(w.index, dtype=str)
+        w = w.fillna(0.0)
+        if abs(float(w.sum()) - 1.0) > 1e-9: w = w / w.sum()
+        return w, ("Min-Vol (EWMA)" if use_ewma else "Min-Vol (Ledoit-Wolf)")
+    except Exception:
+        return inverse_variance_weights(px_hist, lb, ub), "Inverse-Variance"
+
+def optimizer_hrp(px_hist: pd.DataFrame, lb: float, ub: float) -> Tuple[pd.Series, str]:
+    try:
+        from pypfopt.hierarchical_risk_parity import HRPOpt
+        rets = to_returns(px_hist)
+        hrp = HRPOpt(rets)
+        w = pd.Series(hrp.optimize())
+        w.index = pd.Index(w.index, dtype=str)
+        w = w.fillna(0.0)
+        if abs(float(w.sum()) - 1.0) > 1e-9: w = w / w.sum()
+        # Enforce simple caps post-hoc
+        w = pd.Series(_project_to_simplex_with_bounds(w.values, lb, ub), index=w.index)
+        return w, "HRP"
+    except Exception:
+        return inverse_variance_weights(px_hist, lb, ub), "Inverse-Variance"
+
+def optimizer_cvar(returns: pd.DataFrame, alpha: float, lb: float, ub: float, allow_short: bool) -> Tuple[pd.Series, str]:
+    # Minimize CVaR with cvxpy; fallback to inverse-variance
+    try:
+        import cvxpy as cp
+        R = returns.values  # T x N
+        T, N = R.shape
+        w = cp.Variable(N)
+        z = cp.Variable(T)
+        v = cp.Variable(1)   # VaR level
+        tau = 1 - alpha
+        obj = v + (1.0/(tau*T)) * cp.sum(z)
+
+        cons = []
+        if allow_short:
+            cons += [cp.sum(cp.abs(w)) == 1.0, w >= -ub, w <= ub]
+        else:
+            cons += [cp.sum(w) == 1.0, w >= lb, w <= ub]
+        cons += [z >= 0, z >= -(R @ w) - v]
+
+        prob = cp.Problem(cp.Minimize(obj), cons)
+        prob.solve(solver=cp.ECOS, verbose=False, warm_start=True)
+        w_opt = pd.Series(np.array(w.value).ravel(), index=returns.columns).fillna(0.0)
+        # Cap & renorm
+        w_opt = pd.Series(_project_to_simplex_with_bounds(w_opt.values, lb, ub), index=w_opt.index)
+        return w_opt, "Min-CVaR"
+    except Exception:
+        return inverse_variance_weights(returns.cumsum(), lb, ub), "Inverse-Variance"
+
+# ---------- Group/Crypto Caps ----------
+def apply_crypto_cap(weights: pd.Series, crypto_cap: float) -> pd.Series:
     w = weights.copy().fillna(0.0).astype(float)
     crypto = [c for c in w.index if any(k in c for k in CRYPTO_KEYS)]
-    if crypto_cap <= 0:
-        # Nur Non-Crypto behalten & renormieren
-        nca = [c for c in w.index if c not in crypto]
-        if nca:
-            w.loc[crypto] = 0.0
-            s = w.loc[nca].sum()
-            w.loc[nca] = (w.loc[nca] / s) if s > 0 else (1.0/len(nca))
-        return w
-
     if not crypto: return w
-    cs = float(w.loc[crypto].sum())
+    cs = float(w.loc[crypto].clip(lower=0).sum())
+    if crypto_cap <= 0:
+        w.loc[crypto] = 0.0
+        if w.sum() > 0: w = w / w.sum()
+        return w
     if cs > crypto_cap and cs > 0:
         scale = crypto_cap / cs
         w.loc[crypto] = w.loc[crypto] * scale
-        nca = [c for c in w.index if c not in crypto]
-        rem = 1.0 - w.sum()
-        if nca and rem > 0:
-            denom = float(w.loc[nca].sum())
-            if denom <= 0:
-                w.loc[nca] += rem / len(nca)
-            else:
-                w.loc[nca] += rem * (w.loc[nca] / denom)
+        if w.sum() > 0: w = w / w.sum()
     return w
 
-# ---------- Sidebar ----------
-st.title("Alladdin 2.0 — MAXI HEDGEFUND")
+# ---------- UI: Sidebar ----------
+st.title("ALLADDIN 2.0 — MAXI HEDGEFUND")
 st.caption(datetime.now().strftime("%d.%m.%Y %H:%M"))
 
 st.sidebar.header("Settings")
-preset = st.sidebar.checkbox("Use KAYEN preset universe", value=True)
-default_tickers = ["EURUSD=X", "SPY", "TLT", "GLD", "BTC-USD", "ETH-USD"]
-choices = default_tickers + ["QQQ","ACWI","IEF","SLV","GDX","GLDM","XLK","XLF","XLE"]
-tickers = st.sidebar.multiselect("Universe (tickers)", options=choices, default=default_tickers if preset else default_tickers)
+colA, colB = st.sidebar.columns([1,1])
+with colA:
+    if st.button("Clear data cache", use_container_width=True):
+        st.cache_data.clear()
+        st.success("Cache cleared.")
+with colB:
+    preset_toggle = st.checkbox("Use KAYEN preset", value=True)
 
-years = st.sidebar.slider("Years of history", 2, 10, value=5)
+tickers = st.sidebar.multiselect("Universe (tickers)", options=MORE_CHOICES, default=DEFAULT_TICKERS if preset_toggle else DEFAULT_TICKERS)
+years = st.sidebar.slider("Years of history", 2, 15, value=5)
 min_w = st.sidebar.slider("Min weight per asset", 0.00, 0.20, value=0.00, step=0.01)
 max_w = st.sidebar.slider("Max weight per asset", 0.10, 0.70, value=0.35, step=0.01)
-crypto_cap = st.sidebar.slider("Crypto cap (total)", 0.00, 0.60, value=0.20, step=0.01)
+crypto_cap = st.sidebar.slider("Crypto cap (total)", 0.00, 0.80, value=0.20, step=0.01)
 alpha = st.sidebar.slider("Risk alpha (VaR/CVaR)", 0.90, 0.99, value=0.95, step=0.01)
+allow_short = st.sidebar.checkbox("Allow short (experimental)", value=False)
 portfolio_value = st.sidebar.number_input("Portfolio value (EUR)", min_value=1000.0, value=100000.0, step=1000.0, format="%.2f")
+
+# Optimizer choice
+opt_choice = st.sidebar.selectbox("Optimizer", ["Min-Vol", "HRP", "Min-CVaR (tail risk)"], index=0)
+use_ewma = st.sidebar.checkbox("Use EWMA cov in high-vol regime (auto)", value=True)
+# Walk-forward settings
+wf_reb = st.sidebar.selectbox("Backtest rebalance", ["Monthly","Weekly"], index=0)
+wf_cost_bps = st.sidebar.number_input("Transaction cost (bps per turnover)", 0, 200, value=10, step=5)
+wf_turnover_cap = st.sidebar.slider("Turnover cap per rebalance", 0.05, 1.0, value=0.35, step=0.05)
+
+# Presets: save/load
+st.sidebar.markdown("**Presets**")
+if st.sidebar.button("Save current preset"):
+    preset = {
+        "tickers": tickers, "years": years, "min_w": min_w, "max_w": max_w,
+        "crypto_cap": crypto_cap, "alpha": alpha, "allow_short": allow_short,
+        "portfolio_value": portfolio_value, "opt_choice": opt_choice,
+        "use_ewma": use_ewma, "wf_reb": wf_reb, "wf_cost_bps": wf_cost_bps,
+        "wf_turnover_cap": wf_turnover_cap
+    }
+    st.sidebar.download_button("Download preset.json", data=json.dumps(preset, indent=2).encode(),
+                               file_name="preset.json", mime="application/json")
+uploaded = st.sidebar.file_uploader("Load preset.json", type=["json"])
+if uploaded:
+    try:
+        preset = json.load(uploaded)
+        st.session_state.update(preset)
+        st.sidebar.success("Preset loaded. Bitte Seite neu laden (R).")
+    except Exception as e:
+        st.sidebar.error(f"Preset error: {e}")
 
 if len(tickers) == 0:
     st.warning("Bitte mindestens einen Ticker wählen.")
@@ -217,14 +308,22 @@ except Exception as e:
     st.stop()
 
 # ---------- Optimize (target) ----------
-w_opt, used_opt = try_min_vol_weights(px, min_w=min_w, max_w=max_w)
+regime = regime_tag(rets)
+use_ewma_now = (use_ewma and regime == "high-vol")
+
+if opt_choice == "Min-Vol":
+    w_opt, opt_label = optimizer_min_vol(px, lb=min_w, ub=max_w, use_ewma=use_ewma_now)
+elif opt_choice == "HRP":
+    w_opt, opt_label = optimizer_hrp(px, lb=min_w, ub=max_w)
+else:  # Min-CVaR
+    w_opt, opt_label = optimizer_cvar(rets, alpha=alpha, lb=min_w, ub=max_w, allow_short=allow_short)
+
 w_opt = w_opt.reindex(px.columns).fillna(0.0)
 w_opt = apply_crypto_cap(w_opt, crypto_cap)
-s = w_opt.sum()
-w_opt = (w_opt / s) if s > 0 else pd.Series(np.ones(len(px.columns))/len(px.columns), index=px.columns, dtype=float)
+if w_opt.sum() > 0: w_opt = w_opt / w_opt.sum()
 
-# Current portfolio series
-port = (rets.fillna(0.0) @ w_opt.values).rename("Port")
+# ---------- Portfolio series & risk ----------
+port = (rets.fillna(0.0) @ w_opt.values).rename("Portfolio")
 cum  = (1.0 + port).cumprod()
 ann_ret, ann_vol = annualize_stats(port)
 sr = sharpe_ratio(port)
@@ -253,16 +352,13 @@ with tab_overview:
     with b: kpi("Sharpe", f"{sr:.2f}")
     with c: kpi(f"VaR({int(alpha*100)}%) 1d", f"{VaR:.2%}")
     with d: kpi("Max Drawdown", f"{MDD:.2%}")
-    st.caption(f"Optimizer: {'PyPortfolioOpt (min vol)' if used_opt else 'Inverse-Variance Heuristic'} · Crypto Cap: {crypto_cap:.0%}")
+    st.caption(f"Optimizer: {opt_label} · Crypto Cap: {crypto_cap:.0%} · Regime: {regime}")
 
     L, R = st.columns([1.25, 1.0])
     with L:
         st.subheader("Portfolio Overview (target)")
         ytd = {t: rets[t].loc[rets.index.year == rets.index[-1].year].sum() if t in rets.columns else 0.0 for t in px.columns}
-        df_over = pd.DataFrame({
-            "Weight": w_opt.round(4),
-            "YTD Return": pd.Series(ytd).round(4),
-        })
+        df_over = pd.DataFrame({"Weight": w_opt.round(4), "YTD Return": pd.Series(ytd).round(4)})
         st.dataframe(df_over, use_container_width=True)
     with R:
         st.subheader("Risk Metrics")
@@ -276,7 +372,6 @@ with tab_overview:
         }).round(4)
         st.dataframe(df_risk, use_container_width=True)
 
-    # Correlation Heatmap (matplotlib for crisp labels)
     st.subheader("Correlation Heatmap")
     fig, ax = plt.subplots()
     corr = rets.corr()
@@ -313,67 +408,68 @@ with tab_risk:
     except Exception as e:
         st.warning(f"Monte Carlo nicht verfügbar: {e}")
 
-# ---------- Backtest (Monthly Rebalance) ----------
-@st.cache_data(show_spinner=False, ttl=300)
-def load_prices_bt(tickers, years):
-    return load_prices(tickers, years=years)
+# ---------- Backtest (Walk-Forward) ----------
+def monthly_dates(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
+    g = pd.Series(index=index, data=True)
+    return g.groupby([index.year, index.month]).head(1).index
 
-def rebalance_backtest(px, rets, dates, min_w, max_w, crypto_cap, cost_bps):
-    """
-    Robust monthly rebalance with inverse-variance heuristic (fast).
-    Applies crypto cap & transaction costs on turnover.
-    Returns equity curve (Series).
-    """
-    w = None
-    last_w = None
+def weekly_dates(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
+    g = pd.Series(index=index, data=True)
+    return g.groupby([index.year, index.isocalendar().week]).head(1).index
+
+def rebalance_backtest(px: pd.DataFrame, rets: pd.DataFrame, dates: pd.DatetimeIndex,
+                       lb: float, ub: float, crypto_cap: float, cost_bps: float,
+                       turnover_cap: float, opt_choice: str, use_ewma: bool, alpha: float, allow_short: bool) -> pd.Series:
+    w_prev = None
     eq = []
     equity = 1.0
-
     for dt in rets.index:
         if dt in dates:
             px_hist = px.loc[:dt].dropna()
-            w_new = min_vol_heuristic(px_hist, min_w=min_w, max_w=max_w)
-            # Crypto cap & normalize
-            w_new = apply_crypto_cap(w_new, crypto_cap)
-            s = w_new.sum()
-            w_new = (w_new / s) if s > 0 else pd.Series(np.ones(len(w_new))/len(w_new), index=w_new.index)
-            # Costs on turnover
-            if last_w is not None:
-                turnover = float((w_new - last_w).abs().sum())
-                equity *= (1.0 - (cost_bps/10000.0) * turnover)
-            w = w_new.copy()
-            last_w = w.copy()
+            if opt_choice == "Min-Vol":
+                w = optimizer_min_vol(px_hist, lb, ub, use_ewma)[0]
+            elif opt_choice == "HRP":
+                w = optimizer_hrp(px_hist, lb, ub)[0]
+            else:
+                w = optimizer_cvar(rets.loc[:dt].dropna(), alpha, lb, ub, allow_short)[0]
 
-        if w is None:
-            w = pd.Series(1.0/len(rets.columns), index=rets.columns, dtype=float)
+            w = apply_crypto_cap(w, crypto_cap)
+            if w.sum() > 0: w = w / w.sum()
 
-        r = float(rets.loc[dt].reindex(w.index).fillna(0.0).dot(w.values))
+            if w_prev is not None:
+                delta = (w - w_prev).abs().sum()
+                if delta > turnover_cap:
+                    w = w_prev + (w - w_prev) * (turnover_cap / delta)
+                equity *= (1.0 - (cost_bps/10000.0) * delta)
+            w_prev = w.copy()
+        if w_prev is None:
+            w_prev = pd.Series(1.0/len(rets.columns), index=rets.columns, dtype=float)
+        r = float(rets.loc[dt].reindex(w_prev.index).fillna(0.0).dot(w_prev.values))
         equity *= (1.0 + r)
         eq.append(equity)
-
     return pd.Series(eq, index=rets.index, name="Portfolio")
 
 with tab_backtest:
-    st.subheader("Backtest · Performance vs Benchmark  (Monthly Rebalance)")
-    bt_years = st.slider("Backtest years", 2, 10, value=min(5, years), key="bt_years")
-    cost_bps = st.number_input("Transaction cost (bps per turnover)", 0, 200, value=10, step=5, key="bt_cost_bps")
-    bench_ticker = st.selectbox("Benchmark", ["SPY","ACWI","QQQ","IEF","GLD"], index=0, key="bench")
-
-    px_bt = load_prices_bt(tickers, years=bt_years)
+    st.subheader("Walk-Forward Backtest · Portfolio vs Benchmark")
+    bt_years = st.slider("Backtest years", 2, 15, value=min(5, years), key="bt_years")
+    px_bt = load_prices(tickers, years=bt_years)
     rets_bt = to_returns(px_bt).dropna()
-    rebal_dates = rets_bt.groupby([rets_bt.index.year, rets_bt.index.month]).head(1).index
 
-    eq = rebalance_backtest(px_bt, rets_bt, rebal_dates, min_w=min_w, max_w=max_w, crypto_cap=crypto_cap, cost_bps=cost_bps)
+    rebal_dates = monthly_dates(rets_bt.index) if wf_reb == "Monthly" else weekly_dates(rets_bt.index)
+    eq = rebalance_backtest(px_bt, rets_bt, rebal_dates, lb=min_w, ub=max_w, crypto_cap=crypto_cap,
+                            cost_bps=wf_cost_bps, turnover_cap=wf_turnover_cap,
+                            opt_choice=opt_choice, use_ewma=use_ewma_now, alpha=alpha, allow_short=allow_short)
 
+    bench_ticker = st.selectbox("Benchmark", ["SPY","ACWI","QQQ","IEF","GLD"], index=0, key="bench")
     bench_px = yf.download(bench_ticker, period=f"{bt_years}y", auto_adjust=True, progress=False)["Close"].dropna()
     common = eq.index.intersection(bench_px.index)
     bench_eq = bench_px.loc[common] / bench_px.loc[common].iloc[0]
     port_eq  = eq.loc[common] / eq.loc[common].iloc[0]
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=common, y=port_eq.values,  name="Portfolio",  mode="lines"))
+    fig.add_trace(go.Scatter(x=common, y=port_eq.values,  name="Portfolio", mode="lines"))
     fig.add_trace(go.Scatter(x=common, y=bench_eq.values, name=bench_ticker, mode="lines"))
-    fig.update_layout(title="Portfolio vs. Benchmark (Index=1.0)", xaxis_title="Date", yaxis_title="Index", height=420)
+    fig.update_layout(title="Index (Start=1.0)", xaxis_title="Date", yaxis_title="Index", height=420)
     st.plotly_chart(fig, use_container_width=True)
 
     bt_ret = eq.pct_change().dropna()
@@ -389,17 +485,15 @@ with tab_backtest:
     c3.metric("Backtest Sharpe", f"{bt_sha:.2f}")
     c4.metric("Backtest MaxDD", f"{bt_mdd:.2%}")
 
-    # ---- Outperformance-Text (Skalar statt Series) ----
-if len(port_eq) and len(bench_eq):
-    outp = float(port_eq.iloc[-1] / bench_eq.iloc[-1] - 1.0)
-    st.markdown(f"**Outperformance vs {bench_ticker}: {outp:.2%}**")
-else:
-    st.markdown("Outperformance: n/a")
+    if len(port_eq) and len(bench_eq):
+        outp = float(port_eq.iloc[-1] / bench_eq.iloc[-1] - 1.0)
+        st.markdown(f"**Outperformance vs {bench_ticker}: {outp:.2%}**")
+    else:
+        st.markdown("Outperformance: n/a")
 
-# ---------- Factors (simple regression vs macro proxies) ----------
+# ---------- Factors ----------
 with tab_factors:
     st.subheader("Factor Attribution (Daily Returns Regression)")
-    # simple macro factors: stocks, bonds, gold, USD proxy
     factor_map = {
         "Stocks (SPY)": "SPY",
         "Bonds (IEF)": "IEF",
@@ -424,7 +518,6 @@ with tab_factors:
         coefs = dict(zip(["Const"] + list(X.columns), model.params))
         for k in X.columns: beta[k] = float(coefs.get(k, 0.0))
     except Exception:
-        # fallback: least squares
         X_ = np.column_stack([np.ones(len(X)), X.values])
         coef, *_ = np.linalg.lstsq(X_, y.values, rcond=None)
         pred = X_ @ coef
@@ -441,15 +534,31 @@ with tab_factors:
 # ---------- Stress Testing ----------
 with tab_stress:
     st.subheader("Instant Stress Test")
-    st.caption("Simuliere einen plötzlichen Schock auf ausgewählte Assets und sieh die unmittelbare P&L-Wirkung.")
-
-    pick = st.multiselect("Assets to shock", options=list(px.columns), default=[px.columns[0]])
-    shock_pct = st.slider("Shock size (one-day, %) — applied to selected assets", -30, 30, -5, step=1)
-    if st.button("Apply Shock"):
-        shock = pd.Series(0.0, index=px.columns, dtype=float)
-        shock.loc[pick] = shock_pct / 100.0
-        pnl = float((w_opt * shock).sum())
-        st.success(f"Estimated instant portfolio P&L for shock {shock_pct:+d}% on {len(pick)} asset(s): **{pnl:.2%}**")
+    st.caption("Simuliere einen 1-Tages-Schock auf Assets und sieh die unmittelbare P&L-Wirkung.")
+    scenario_lib = {
+        "Tech+Crypto Crash": {"AAPL": -0.15, "MSFT": -0.15, "SPY": -0.12, "BTC-USD": -0.25, "ETH-USD": -0.35},
+        "Rates Spike": {"TLT": -0.08, "SPY": -0.04},
+        "USD Surge": {"EURUSD=X": -0.02, "GLD": -0.03, "SPY": -0.03},
+        "Crypto Winter": {"BTC-USD": -0.30, "ETH-USD": -0.40}
+    }
+    scn = st.selectbox("Scenario", list(scenario_lib.keys()), index=0)
+    pick = st.multiselect("Assets to shock (optional override)", options=list(px.columns), default=[])
+    shock_pct = st.slider("Shock size (manual, %)", -40, 40, -5, step=1)
+    left, right = st.columns([1,1])
+    with left:
+        if st.button("Apply Scenario"):
+            shock = pd.Series(0.0, index=px.columns, dtype=float)
+            for k,v in scenario_lib[scn].items():
+                if k in shock.index: shock.loc[k] = v
+            pnl = float((w_opt * shock).sum())
+            st.success(f"[{scn}] Estimated instant P&L: **{pnl:.2%}**")
+    with right:
+        if st.button("Apply Manual Shock"):
+            shock = pd.Series(0.0, index=px.columns, dtype=float)
+            for k in pick:
+                shock.loc[k] = shock_pct / 100.0
+            pnl = float((w_opt * shock).sum())
+            st.info(f"Manual shock P&L: **{pnl:.2%}**")
 
 # ---------- Trades / Rebalance Planner ----------
 with tab_trades:
@@ -482,11 +591,13 @@ with tab_trades:
 with tab_report:
     st.subheader("One-Click HTML Report")
     html = f"""
-    <html><head><meta charset="utf-8"><title>Alladdin 2.0 Report</title></head>
+    <html><head><meta charset="utf-8"><title>ALLADDIN 2.0 Report</title></head>
     <body style="font-family:Inter,system-ui,sans-serif;background:#0e1117;color:#e5e7eb;">
-      <h2>Alladdin 2.0 — Summary ({datetime.now().strftime('%Y-%m-%d %H:%M')})</h2>
+      <h2>ALLADDIN 2.0 — Summary ({datetime.now().strftime('%Y-%m-%d %H:%M')})</h2>
       <p><b>Universe:</b> {', '.join(tickers)}</p>
-      <p><b>Weights:</b> {w_opt.round(4).to_dict()}</p>
+      <p><b>Optimizer:</b> {opt_label} | <b>Regime:</b> {regime} | <b>Crypto cap:</b> {crypto_cap:.0%}</p>
+      <h3>Weights</h3>
+      <pre>{json.dumps({k: float(v) for k,v in w_opt.round(4).to_dict().items()}, indent=2)}</pre>
       <h3>Key Metrics</h3>
       <ul>
         <li>Annualized Return: {annualize_stats(port)[0]:.2%}</li>
@@ -496,8 +607,7 @@ with tab_report:
         <li>CVaR({int(alpha*100)}%) ~ {ES:.2%}</li>
         <li>Max Drawdown: {MDD:.2%}</li>
       </ul>
-      <h3>Notes</h3>
-      <p>Optimization: {'PyPortfolioOpt (min vol)' if used_opt else 'Inverse-Variance Heuristic'}; Crypto cap: {crypto_cap:.0%}.</p>
+      <p class="smallnote">Hinweis: Min-CVaR/HRP benötigen optionale Libraries; bei Fehlen wird robustes Fallback genutzt.</p>
     </body></html>
     """
     st.download_button("Download HTML Report", data=html.encode("utf-8"),
