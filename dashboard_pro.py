@@ -596,6 +596,8 @@ with tab_backtest:
 # ---------- Factors ----------
 with tab_factors:
     st.subheader("Factor Attribution (Daily Returns Regression)")
+
+    # Einfache Makro-Faktoren
     factor_map = {
         "Stocks (SPY)": "SPY",
         "Bonds (IEF)": "IEF",
@@ -603,14 +605,20 @@ with tab_factors:
         "USD (UUP proxy)": "UUP",
     }
     fac_tickers = list(factor_map.values())
+
+    # Faktorpreise & Faktorreturns laden
     fac_px = load_prices(fac_tickers, years=min(years, 5))
     fac_rets = to_returns(fac_px)
 
-    y = port_eff := port * scale_live
-    y = y.reindex(fac_rets.index).dropna()
+    # Zielvariable: portfolio returns (post-scale / vol-targeted)
+    port_eff = port * scale_live
+    y = port_eff.reindex(fac_rets.index).dropna()
+
+    # Regressoren: Faktorreturns (auf y-Index)
     X = fac_rets.reindex(y.index).fillna(0.0).copy()
     X.columns = list(factor_map.keys())
 
+    # OLS mit statsmodels (falls vorhanden), sonst Fallback mit numpy
     beta = {}
     r2 = 0.0
     try:
@@ -619,14 +627,15 @@ with tab_factors:
         model = sm.OLS(y.values, X_.values).fit()
         r2 = float(model.rsquared)
         coefs = dict(zip(["Const"] + list(X.columns), model.params))
-        for k in X.columns: beta[k] = float(coefs.get(k, 0.0))
+        for k in X.columns:
+            beta[k] = float(coefs.get(k, 0.0))
     except Exception:
         X_ = np.column_stack([np.ones(len(X)), X.values])
         coef, *_ = np.linalg.lstsq(X_, y.values, rcond=None)
         pred = X_ @ coef
-        ss_res = np.sum((y.values - pred)**2)
-        ss_tot = np.sum((y.values - y.values.mean())**2)
-        r2 = 0.0 if ss_tot==0 else 1 - ss_res/ss_tot
+        ss_res = np.sum((y.values - pred) ** 2)
+        ss_tot = np.sum((y.values - y.values.mean()) ** 2)
+        r2 = 0.0 if ss_tot == 0 else 1 - ss_res / ss_tot
         for i, k in enumerate(X.columns, start=1):
             beta[k] = float(coef[i])
 
@@ -637,31 +646,40 @@ with tab_factors:
 # ---------- Stress Testing ----------
 with tab_stress:
     st.subheader("Instant Stress Test")
-    st.caption("Simuliere einen 1-Tages-Schock (post-scale Returns wirken proportional).")
+    st.caption("Simuliere 1-Tages-Schocks. P&L wird auf die post-scale Serie (Vol-Target) bezogen.")
+
+    # Beispiel-Szenarien
     scenario_lib = {
-        "Tech+Crypto Crash": {"AAPL": -0.15, "MSFT": -0.15, "SPY": -0.12, "BTC-USD": -0.25, "ETH-USD": -0.35},
+        "Tech + Crypto Crash": {"AAPL": -0.15, "MSFT": -0.15, "SPY": -0.12, "BTC-USD": -0.25, "ETH-USD": -0.35},
         "Rates Spike": {"TLT": -0.08, "SPY": -0.04},
         "USD Surge": {"EURUSD=X": -0.02, "GLD": -0.03, "SPY": -0.03},
-        "Crypto Winter": {"BTC-USD": -0.30, "ETH-USD": -0.40}
+        "Crypto Winter": {"BTC-USD": -0.30, "ETH-USD": -0.40},
     }
+
     scn = st.selectbox("Scenario", list(scenario_lib.keys()), index=0)
     pick = st.multiselect("Assets to shock (optional override)", options=list(px.columns), default=[])
     shock_pct = st.slider("Shock size (manual, %)", -40, 40, -5, step=1)
-    left, right = st.columns([1,1])
+
+    left, right = st.columns(2)
+
     with left:
         if st.button("Apply Scenario"):
             shock = pd.Series(0.0, index=px.columns, dtype=float)
-            for k,v in scenario_lib[scn].items():
-                if k in shock.index: shock.loc[k] = v
-            pnl = float((w_opt * shock).sum()) * scale_live
+            for k, v in scenario_lib[scn].items():
+                if k in shock.index:
+                    shock.loc[k] = v
+            pnl = float((w_opt * shock).sum()) * float(scale_live)
             st.success(f"[{scn}] Estimated instant P&L (post-scale): **{pnl:.2%}**")
+
     with right:
         if st.button("Apply Manual Shock"):
-            shock = pd.Series(0.0, index=px.columns, dtype=float)
-            for k in pick:
-                shock.loc[k] = shock_pct / 100.0
-            pnl = float((w_opt * shock).sum()) * scale_live
-            st.info(f"Manual shock P&L (post-scale): **{pnl:.2%}**")
+            if not pick:
+                st.info("Bitte mindestens ein Asset auswählen.")
+            else:
+                shock = pd.Series(0.0, index=px.columns, dtype=float)
+                shock.loc[pick] = shock_pct / 100.0
+                pnl = float((w_opt * shock).sum()) * float(scale_live)
+                st.info(f"Manual shock P&L (post-scale): **{pnl:.2%}**")
 
 # ---------- Trades / Rebalance Planner ----------
 with tab_trades:
