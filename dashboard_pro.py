@@ -118,33 +118,21 @@ st.markdown('<div class="background-grid"></div>', unsafe_allow_html=True)
 
 # ---------- Assets & FX ----------
 ASSET_MAP: Dict[str, str] = {
-    "BTCSD": "BTC-USD",          # Friendly "BTCSD" → echter Ticker BTC-USD
+    "BTCUSD": "BTC-USD",
     "ETHUSD": "ETH-USD",
     "SOLUSD": "SOL-USD",
     "Apple": "AAPL",
     "Tesla": "TSLA",
     "Gold": "GLD",
     "NVIDIA": "NVDA",
-    "NASDAQ": "QQQ",             # Nasdaq-100 proxy
-    "S&P 500": "SPY",            # S&P 500 proxy
+    "NASDAQ": "QQQ",        # Nasdaq-100 proxy
+    "S&P 500": "SPY",       # S&P 500 proxy
     "MSCI World ETF": "URTH",
-    "STARLINK (SPACE X)": "UFO", # Procure Space ETF
+    "STARLINK (SPACE X)": "UFO",  # Procure Space ETF
 }
-FRIENDLY_ORDER = [
-    "BTCSD",
-    "ETHUSD",
-    "SOLUSD",
-    "Apple",
-    "Tesla",
-    "Gold",
-    "NVIDIA",
-    "NASDAQ",
-    "S&P 500",
-    "MSCI World ETF",
-    "STARLINK (SPACE X)",
-]
+FRIENDLY_ORDER = list(ASSET_MAP.keys())
 
-# Group tags
+# Group tags (extend as you like)
 CRYPTOS = {"BTC-USD","ETH-USD","SOL-USD"}
 EQUITIES = {"AAPL","TSLA","NVDA","QQQ","SPY","URTH","UFO"}
 HEDGE_TICKERS = {"GLD"}  # gold overlay candidate
@@ -211,42 +199,19 @@ def ewma_cov(returns: pd.DataFrame, lam: float = 0.94) -> pd.DataFrame:
     return pd.DataFrame(S, index=returns.columns, columns=returns.columns)
 
 def corr_regime(returns: pd.DataFrame, lookback:int=63) -> float:
-    if returns is None or returns.empty:
-        return 0.0
-    lb = min(lookback, len(returns))
-    if lb < 3:
-        return 0.0
-    c = returns.tail(lb).corr().values
-    if c.size == 0:
-        return 0.0
+    if len(returns)<lookback: return 0.0
+    c = returns.tail(lookback).corr().values
     iu = np.triu_indices_from(c, 1)
-    return float(np.nanmean(c[iu])) if len(iu[0]) else 0.0
+    return float(np.nanmean(c[iu]))
 
-def regime_tag(returns: pd.DataFrame,
-               lb_vol:int=21, lb_mom:int=63,
-               thr_vol:float=0.025, thr_corr:float=0.40) -> str:
-    if returns is None or returns.empty or len(returns) < 3:
-        return "unknown"
-
-    vol_df = returns.rolling(lb_vol).std()
-    if vol_df.dropna(how="all").shape[0] > 0 and not vol_df.dropna(how="all").tail(1).empty:
-        vol = float(vol_df.dropna(how="all").tail(1).mean(axis=1).iloc[0])
-    else:
-        vol = float(returns.std(ddof=0).mean())
-
-    cs_mean = returns.mean(axis=1)
-    mom_roll = cs_mean.rolling(lb_mom).mean()
-    if mom_roll.dropna().shape[0] > 0 and not mom_roll.dropna().tail(1).empty:
-        mom = float(mom_roll.dropna().tail(1).iloc[0])
-    else:
-        mom = float(cs_mean.mean())
-
-    acorr = corr_regime(returns, lookback=lb_mom)
-
-    if vol > thr_vol and acorr > thr_corr:
-        return "high-vol"
-    if mom < 0:
-        return "bear"
+def regime_tag(returns: pd.DataFrame) -> str:
+    if returns.empty: return "unknown"
+    vol = returns.rolling(21).std().dropna().iloc[-1].mean()
+    mom = returns.mean().rolling(63).mean().dropna().iloc[-1].mean()
+    acorr = corr_regime(returns, 63)
+    # simple heuristic
+    if vol > 0.025 and acorr > 0.4: return "high-vol"
+    if mom < 0: return "bear"
     return "normal"
 
 def sparkline(series: pd.Series, height=60):
@@ -314,7 +279,7 @@ def load_ohlcv(tickers: List[str], years: int = 5, clamp_thr: float=0.40) -> Tup
         px = df["Adj Close"] if "Adj Close" in df.columns else df["Close"]
         vol = df["Volume"] if "Volume" in df.columns else pd.DataFrame(index=px.index)
     px = px.reindex(columns=[t for t in tickers if t in px.columns]).ffill().bfill()
-    vol = vol.reindex(columns=[t for t in vol.columns]).fillna(0)
+    vol = vol.reindex(columns=[t for t in tickers if t in vol.columns]).fillna(0)
     pct = px.pct_change(); bad = pct.abs() > clamp_thr
     if bad.any().any():
         px = px.copy()
@@ -392,6 +357,7 @@ def optimizer_cvar(returns: pd.DataFrame, alpha: float, lb: float, ub: float, al
     except Exception:
         return inverse_variance_weights(returns.cumsum(), lb, ub), "Inverse-Variance"
 
+# --- ERC (Equal Risk Contribution) ---
 def optimizer_erc(px_hist: pd.DataFrame, lb: float, ub: float, use_ewma: bool=True, iters:int=500) -> Tuple[pd.Series, str]:
     rets = to_returns(px_hist)
     S = ewma_cov(rets) if use_ewma else rets.cov()
@@ -403,6 +369,7 @@ def optimizer_erc(px_hist: pd.DataFrame, lb: float, ub: float, use_ewma: bool=Tr
         rc = w * mrc
         target = np.mean(rc)
         grad = rc - target
+        # simple projected gradient
         w = w - 0.05 * grad
         w = _project_to_simplex_with_bounds(w, lb, ub)
     return pd.Series(w, index=px_hist.columns, dtype=float), "ERC"
@@ -481,6 +448,7 @@ def apply_caps(weights: pd.Series, crypto_cap: float, equity_cap: float, single_
     return w
 
 def enforce_risk_budget(weights: pd.Series, returns: pd.DataFrame, group_caps: Dict[str,float]) -> pd.Series:
+    """Approximate risk-budgeting via scaling to keep group risk contributions under caps."""
     if weights.sum() == 0 or returns.empty: return weights
     S = returns.cov().reindex(index=weights.index, columns=weights.index).fillna(0.0)
     w = weights.copy().values
@@ -501,9 +469,11 @@ def enforce_risk_budget(weights: pd.Series, returns: pd.DataFrame, group_caps: D
         for g, cap in group_caps.items():
             if g in grp_rc and grp_rc[g] > cap + 1e-6:
                 factor = cap / max(1e-12, grp_rc[g])
+                # scale down all w in group slightly
                 w[groups[g]] *= factor
                 scaled = True
         if not scaled: break
+        # renormalize
         w = np.clip(w, 0, None); 
         if w.sum()>0: w /= w.sum()
     return pd.Series(w, index=weights.index)
@@ -525,7 +495,7 @@ with colA:
 with colB:
     preset_toggle = st.checkbox("Use KAYEN preset", value=True)
 
-DEFAULT_FRIENDLY = ["BTCSD","ETHUSD","SOLUSD","Apple","Tesla","Gold","NVIDIA","NASDAQ","S&P 500","MSCI World ETF","STARLINK (SPACE X)"]
+DEFAULT_FRIENDLY = ["BTCUSD","ETHUSD","SOLUSD","Apple","Tesla","Gold","NVIDIA","NASDAQ","S&P 500","MSCI World ETF","STARLINK (SPACE X)"]
 friendly_selection = st.sidebar.multiselect(
     "Universe (choose from your set)", options=FRIENDLY_ORDER,
     default=DEFAULT_FRIENDLY if preset_toggle else DEFAULT_FRIENDLY
@@ -657,8 +627,9 @@ def fx_series(base_ccy: str, index_like: pd.DatetimeIndex) -> pd.Series:
     else: s = pd.Series(1.0, index=index_like)
     return s.rename("FX")
 
-# Convert to base ccy
+# For USD-quoted assets, base wealth in chosen base_ccy
 fx = fx_series(base_ccy, px_usd.index)
+# USD asset price converted into base_ccy: if base=EUR and sym=EURUSD (USD per EUR), USD_px / EURUSD -> base EUR
 px_base = px_usd.div(fx, axis=0)
 rets_base = to_returns(px_base).dropna(how="all")
 
@@ -711,11 +682,13 @@ def run_single_optimizer(name:str, px_hist:pd.DataFrame) -> pd.Series:
             return optimizer_min_vol(px_hist, lb=min_w, ub=max_w, use_ewma=True)[0]
     if name == "ERC":
         return optimizer_erc(px_hist, lb=min_w, ub=max_w, use_ewma=use_ewma_now)[0]
+    # fallback
     return inverse_variance_weights(px_hist, min_w, max_w)
 
 OPT_LIST = ["Min-Vol","HRP","Min-CVaR","Black-Litterman","ERC"]
 
 def ensemble_blend(px_hist: pd.DataFrame, returns: pd.DataFrame) -> Tuple[pd.Series, Dict[str,float]]:
+    """CV-basiertes Blending: Finde Nichtnegativ-Gewichte der Optimizer, die OOS-Sharpe maximieren."""
     models = {}
     for o in OPT_LIST:
         try:
@@ -727,33 +700,37 @@ def ensemble_blend(px_hist: pd.DataFrame, returns: pd.DataFrame) -> Tuple[pd.Ser
     if not models:
         return inverse_variance_weights(px_hist, min_w, max_w), { "IV": 1.0 }
 
+    # Purged K-Fold
     k, embargo = 5, 10
     idx = returns.index
     fold_size = len(idx)//k if k>0 else len(idx)
-    X = []
+    X, y = [], []
     for i in range(k):
         start = i*fold_size; end = (i+1)*fold_size if i<k-1 else len(idx)
         te_idx = idx[start:end]
         pre_end = max(0, start-embargo); post_start = min(len(idx), end+embargo)
-        _ = idx[:pre_end].append(idx[post_start:])  # train (unused in this light blend)
+        tr_idx = idx[:pre_end].append(idx[post_start:])
+        # Compute each model OOS Sharpe on te
         feats = []
         for o,w in models.items():
             r_te = returns.loc[te_idx].reindex(columns=w.index).fillna(0.0).dot(w.values)
             sr_te = sharpe_ratio(r_te)
             feats.append(sr_te)
-        X.append(feats)
-    if not X:
+        X.append(feats); y.append(1.0) # dummy target
+    if not X:  # on very short history
         avg = sum(models.values())/len(models)
         return avg/avg.sum(), {o: 1/len(models) for o in models}
 
     X = np.array(X)
+    # Nonnegative weights sum to 1 -> simple uniform init + project
     blend = np.ones(X.shape[1]) / X.shape[1]
+    # Score = mean OOS Sharpe of blended signal
     for _ in range(200):
-        grad = np.mean(X, axis=0)
+        grad = np.mean(X, axis=0)  # gradient approx
         blend = blend + 0.1*(grad - np.mean(grad))
         blend = np.clip(blend, 0, None)
         if blend.sum()>0: blend/=blend.sum()
-
+    # combine model weights
     w_sum = None
     for i,(o,w) in enumerate(models.items()):
         part = blend[i] * w
@@ -792,6 +769,7 @@ if w_tilt.sum() > 0: w_opt = (w_tilt / w_tilt.sum()).fillna(0.0)
 
 # ---------- Portfolio series (base ccy) & FX-hedge ----------
 port_core = (rets_base.fillna(0.0) @ w_opt.values).rename("Portfolio")
+# Add FX hedge overlay (hedge USD back to base)
 if base_ccy != "USD" and fx_hedge_ratio > 0:
     port_core = port_core + fx_hedge_ratio * fx_ret.reindex(port_core.index).fillna(0.0)
 
@@ -801,7 +779,7 @@ dd_live = (cum_core/cum_core.cummax()-1.0).iloc[-1]
 hedge_add = 0.0
 if hedge_overlay_on:
     if dd_live < -dd_guard_thr or regime in ["bear","high-vol"]:
-        hedge_add = min(0.10, dd_guard_strength*0.10)  # bis 10% Overlay
+        hedge_add = min(0.10, dd_guard_strength*0.10)  # up to 10% overlay
 port = port_core + hedge_add * rets_base.get("GLD", pd.Series(0.0, index=port_core.index)).reindex(port_core.index).fillna(0.0)
 
 cum  = (1.0 + port).cumprod()
@@ -936,6 +914,13 @@ def weekly_dates(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
     g = pd.Series(index=index, data=True); return g.groupby([index.year, index.isocalendar().week]).head(1).index
 
 def almgren_chriss_cost(trade_frac: pd.Series, eq: float, adv_notional: pd.Series, slices:int, ac_temp:float, ac_perm:float) -> float:
+    """
+    trade_frac: absolute Δw (per asset) executed this rebalance
+    eq: current equity (index units)
+    adv_notional: %ADV capacity (notional)
+    temp cost ~ ac_temp * sum( (notional/ADV) / slices )^0.5
+    perm cost ~ ac_perm * sum( (notional/ADV) )
+    """
     if trade_frac.sum()<=0: return 0.0
     notional = trade_frac * eq
     cap = adv_notional.replace(0, np.nan)
@@ -965,6 +950,7 @@ def rebalance_backtest(px: pd.DataFrame, rets: pd.DataFrame, vol_df: pd.DataFram
             if px_hist.shape[0] < min_hist:
                 w = pd.Series(1.0/len(rets.columns), index=rets.columns, dtype=float)
             else:
+                # ensemble inside WF: cheaper single for speed
                 w = run_single_optimizer(opt_choice, px_hist)
                 w = apply_caps(w, crypto_cap, equity_cap, single_cap)
                 if w.sum() > 0: w = w / w.sum()
@@ -987,11 +973,12 @@ def rebalance_backtest(px: pd.DataFrame, rets: pd.DataFrame, vol_df: pd.DataFram
                 delta *= scale
                 if float(delta.sum()) > turnover_cap:
                     delta = delta * (turnover_cap / float(delta.sum()))
+                # Impact cost (legacy sqrt + AC light)
                 traded_notional = delta * equity
                 imp = pd.Series(0.0, index=w.index, dtype=float)
                 if mask.any():
                     z = traded_notional[mask] / max_notional[mask].replace(0,np.nan)
-                    imp.loc[mask] = (base_bps/10000.0) + (wf_impact_k/10000.0) * np.sqrt(z.clip(lower=0.0).fillna(0.0))
+                    imp.loc[mask] = (base_bps/10000.0) + (impact_k/10000.0) * np.sqrt(z.clip(lower=0.0).fillna(0.0))
                 else:
                     imp += (base_bps/10000.0)
                 tc_legacy = float(imp.fillna(base_bps/10000.0).sum())
@@ -1005,10 +992,12 @@ def rebalance_backtest(px: pd.DataFrame, rets: pd.DataFrame, vol_df: pd.DataFram
         if w_prev is None:
             w_prev = pd.Series(1.0/len(rets.columns), index=rets.columns, dtype=float)
 
+        # Risk targeting (63d)
         hist = rets.loc[:dt].tail(63).reindex(columns=w_prev.index).dot(w_prev.values)
         curr_vol = hist.std() * np.sqrt(252) if len(hist) else 0.0
         sf = min(max_leverage, (target_vol / max(1e-8, curr_vol))) if curr_vol > 0 else 1.0
 
+        # Drawdown guard & hedge overlay
         cum_peak = max(cum_peak, equity)
         dd = equity/cum_peak - 1.0
         guard = 1.0
@@ -1017,8 +1006,9 @@ def rebalance_backtest(px: pd.DataFrame, rets: pd.DataFrame, vol_df: pd.DataFram
             guard = max(0.3, 1.0 - dd_strength * (over/max(1e-6, dd_thr)))
         r_core = float(rets.loc[dt].reindex(w_prev.index).fillna(0.0).dot(w_prev.values))
         r = r_core
-        if base_ccy != "USD": r += fx_ret.reindex([dt]).fillna(0.0).iloc[0] * 0.0  # already handled ex-ante
+        if base_ccy != "USD": r += fx_ret.reindex([dt]).fillna(0.0).iloc[0] * 0.0  # already handled ex-ante in px
 
+        # Hedge overlay GLD when needed
         if hedge_overlay_on and (dd < -dd_thr):
             r += 0.05 * float(rets.get("GLD", pd.Series(0.0, index=[dt])).reindex([dt]).fillna(0.0).iloc[0])
 
@@ -1032,6 +1022,7 @@ with tab_backtest:
     st.subheader("Walk-Forward Backtest · Portfolio vs Benchmark (TC/Liquidity-aware + AC)")
     bt_years = st.slider("Backtest years", 2, 15, value=min(5, years), key="bt_years")
     px_bt, vol_bt = load_ohlcv(tickers, years=bt_years, clamp_thr=outlier_thr)
+    # convert to base
     fx_bt = fx_series(base_ccy, px_bt.index)
     px_bt_base = px_bt.div(fx_bt, axis=0)
     rets_bt = to_returns(px_bt_base).dropna()
@@ -1052,43 +1043,23 @@ with tab_backtest:
         ac_temp=ac_temp, ac_perm=ac_perm, ac_slices=ac_slices
     )
 
-# -------- Benchmark robust laden & in Basiswährung bringen --------
-bench_ticker = st.selectbox("Benchmark", ["SPY", "QQQ", "URTH", "GLD"], index=0, key="bench")
-
-def _force_series(obj: pd.DataFrame | pd.Series, prefer_col: str | None = None) -> pd.Series:
-    if isinstance(obj, pd.DataFrame):
-        if prefer_col is not None and prefer_col in obj.columns:
-            s = obj[prefer_col]
-        else:
-            s = obj.iloc[:, 0]
-        return pd.Series(s).dropna()
-    return pd.Series(obj).dropna()
-
-try:
-    bench_raw = _download_with_retry(bench_ticker, period=f"{bt_years}y")
-    bench_df  = _normalize_price_frame(bench_raw)
-    bench_usd = _force_series(bench_df, prefer_col="Close" if "Close" in getattr(bench_df, "columns", []) else bench_ticker)
-except Exception:
+    bench_ticker = st.selectbox("Benchmark", ["SPY","QQQ","URTH","GLD"], index=0, key="bench")
+    bench_px_raw = _download_with_retry(bench_ticker, period=f"{bt_years}y")
     try:
-        bench_usd = yf.download(bench_ticker, period=f"{bt_years}y",
-                                auto_adjust=True, progress=False)["Close"].dropna()
+        bench_px_usd = _normalize_price_frame(bench_px_raw)["Close"].dropna()
     except Exception:
-        bench_usd = pd.Series(dtype=float)
-
-fx_bench = fx_series(base_ccy, bench_usd.index)
-bench_px  = bench_usd / fx_bench
-
-common = eq.index.intersection(bench_px.index)
-
-if len(common) >= 2:
-    port_eq  = (eq.loc[common] / float(eq.loc[common].iloc[0])).astype(float)
-    bench_eq = (bench_px.loc[common] / float(bench_px.loc[common].iloc[0])).astype(float)
+        bench_px_usd = yf.download(bench_ticker, period=f"{bt_years}y", auto_adjust=True, progress=False)["Close"].dropna()
+    # convert bench to base
+    fx_bench = fx_series(base_ccy, bench_px_usd.index)
+    bench_px = bench_px_usd / fx_bench
+    common = eq.index.intersection(bench_px.index)
+    bench_eq = bench_px.loc[common] / bench_px.loc[common].iloc[0]
+    port_eq  = eq.loc[common] / eq.loc[common].iloc[0]
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=common, y=port_eq.values,  name="Portfolio", mode="lines"))
     fig.add_trace(go.Scatter(x=common, y=bench_eq.values, name=bench_ticker, mode="lines"))
-    fig.update_layout(title="Index (Start=1.0)", xaxis_title="Date", yaxis_title="Index",
-                      height=420, template="aladdin")
+    fig.update_layout(title="Index (Start=1.0)", xaxis_title="Date", yaxis_title="Index", height=420, template="aladdin")
     st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CFG)
 
     bt_ret = eq.pct_change().dropna()
@@ -1106,12 +1077,11 @@ if len(common) >= 2:
     c4.metric("Backtest MaxDD", f"{bt_mdd:.2%}")
     c5.metric("Avg TC (ann.)", f"{tc_ann:.2%}")
 
-    last_port  = float(port_eq.iloc[-1])
-    last_bench = float(bench_eq.iloc[-1])
-    outp = last_port / last_bench - 1.0
-    st.markdown(f"**Outperformance vs {bench_ticker}: {outp:.2%}**")
-else:
-    st.info("Benchmark-Zeitreihe zu kurz oder keine Überschneidung mit Portfolio-History.")
+    if len(port_eq) and len(bench_eq):
+        outp = float(port_eq.iloc[-1] / bench_eq.iloc[-1] - 1.0)
+        st.markdown(f"**Outperformance vs {bench_ticker}: {outp:.2%}**")
+    else:
+        st.markdown("Outperformance: n/a")
 
 # ---------- CV & Deflated Sharpe ----------
 def time_series_folds(index: pd.DatetimeIndex, k: int=5, embargo: int=10):
@@ -1153,6 +1123,7 @@ with tab_cv:
 
 # ---------- Reality Check / PBO ----------
 def pbo_probability(returns: pd.DataFrame, opt_names: List[str], trials:int=20) -> float:
+    """Combinatorial CV surrogate: wähle IS-Best-Optimizer, prüfe OOS ob er schlechter als Median ist."""
     if returns.isna().any().any() or len(returns)<250: return np.nan
     pbo_hits = 0; total = 0
     idx = returns.index
@@ -1163,12 +1134,14 @@ def pbo_probability(returns: pd.DataFrame, opt_names: List[str], trials:int=20) 
         best = srs_is.idxmax()
         srs_oos = returns.loc[oos_idx].apply(sharpe_ratio, axis=0)
         if best in srs_oos.index:
+            # underperform vs. median?
             if srs_oos[best] < srs_oos.median(): pbo_hits+=1
             total+=1
     return (pbo_hits/total) if total>0 else np.nan
 
 with tab_pbo:
     st.subheader("Reality Check (PBO) — Probability of Backtest Overfitting")
+    # Build strategy returns from optimizers on full sample (fixed weights over time; simplistic proxy)
     strat_rets = {}
     for o in OPT_LIST:
         try:
@@ -1191,6 +1164,7 @@ with tab_factors:
     st.subheader("Factor Attribution (Daily Returns Regression)")
     factor_map = {"Stocks (SPY)": "SPY", "Bonds (IEF)": "IEF", "Gold (GLD)": "GLD", "USD (UUP proxy)": "UUP"}
     fac_px_usd = load_prices(list(factor_map.values()), years=min(5, years), clamp_thr=outlier_thr)
+    # convert to base ccy
     fac_px = fac_px_usd.div(fx, axis=0).dropna(how="all")
     fac_rets = to_returns(fac_px)
 
@@ -1411,3 +1385,4 @@ with tab_report:
                        file_name="aladdin_report.html", mime="text/html")
 
 # ================== END ==================
+
