@@ -1082,23 +1082,46 @@ with tab_backtest:
         ac_temp=ac_temp, ac_perm=ac_perm, ac_slices=ac_slices
     )
 
-    bench_ticker = st.selectbox("Benchmark", ["SPY","QQQ","URTH","GLD"], index=0, key="bench")
-    bench_px_raw = _download_with_retry(bench_ticker, period=f"{bt_years}y")
+   # -------- Benchmark robust laden & in Basiswährung bringen --------
+bench_ticker = st.selectbox("Benchmark", ["SPY", "QQQ", "URTH", "GLD"], index=0, key="bench")
+
+def _force_series(obj: pd.DataFrame | pd.Series, prefer_col: str | None = None) -> pd.Series:
+    """Nimmt DataFrame oder Series entgegen und gibt IMMER eine 1D-Series zurück."""
+    if isinstance(obj, pd.DataFrame):
+        if prefer_col is not None and prefer_col in obj.columns:
+            s = obj[prefer_col]
+        else:
+            s = obj.iloc[:, 0]
+        return pd.Series(s).dropna()
+    return pd.Series(obj).dropna()
+
+try:
+    bench_raw = _download_with_retry(bench_ticker, period=f"{bt_years}y")
+    bench_df  = _normalize_price_frame(bench_raw)
+    bench_usd = _force_series(bench_df, prefer_col=bench_ticker)
+except Exception:
     try:
-        bench_px_usd = _normalize_price_frame(bench_px_raw)["Close"].dropna()
+        bench_usd = yf.download(bench_ticker, period=f"{bt_years}y",
+                                auto_adjust=True, progress=False)["Close"].dropna()
     except Exception:
-        bench_px_usd = yf.download(bench_ticker, period=f"{bt_years}y", auto_adjust=True, progress=False)["Close"].dropna()
-    # convert bench to base
-    fx_bench = fx_series(base_ccy, bench_px_usd.index)
-    bench_px = bench_px_usd / fx_bench
-    common = eq.index.intersection(bench_px.index)
-    bench_eq = bench_px.loc[common] / bench_px.loc[common].iloc[0]
-    port_eq  = eq.loc[common] / eq.loc[common].iloc[0]
+        bench_usd = pd.Series(dtype=float)
+
+# in Basiswährung umrechnen
+fx_bench = fx_series(base_ccy, bench_usd.index)
+bench_px  = bench_usd / fx_bench
+
+# -------- Gemeinsame Timeline & Performance-Kurven --------
+common = eq.index.intersection(bench_px.index)
+
+if len(common) >= 2:
+    port_eq  = (eq.loc[common] / float(eq.loc[common].iloc[0])).astype(float)
+    bench_eq = (bench_px.loc[common] / float(bench_px.loc[common].iloc[0])).astype(float)
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=common, y=port_eq.values,  name="Portfolio", mode="lines"))
     fig.add_trace(go.Scatter(x=common, y=bench_eq.values, name=bench_ticker, mode="lines"))
-    fig.update_layout(title="Index (Start=1.0)", xaxis_title="Date", yaxis_title="Index", height=420, template="aladdin")
+    fig.update_layout(title="Index (Start=1.0)", xaxis_title="Date", yaxis_title="Index",
+                      height=420, template="aladdin")
     st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CFG)
 
     bt_ret = eq.pct_change().dropna()
@@ -1116,11 +1139,12 @@ with tab_backtest:
     c4.metric("Backtest MaxDD", f"{bt_mdd:.2%}")
     c5.metric("Avg TC (ann.)", f"{tc_ann:.2%}")
 
-    if len(port_eq) and len(bench_eq):
-        outp = float(port_eq.iloc[-1] / bench_eq.iloc[-1] - 1.0)
-        st.markdown(f"**Outperformance vs {bench_ticker}: {outp:.2%}**")
-    else:
-        st.markdown("Outperformance: n/a")
+    last_port  = float(port_eq.iloc[-1])
+    last_bench = float(bench_eq.iloc[-1])
+    outp = last_port / last_bench - 1.0
+    st.markdown(f"**Outperformance vs {bench_ticker}: {outp:.2%}**")
+else:
+    st.info("Benchmark-Zeitreihe zu kurz oder keine Überschneidung mit Portfolio-History.")
 
 # ---------- CV & Deflated Sharpe ----------
 def time_series_folds(index: pd.DatetimeIndex, k: int=5, embargo: int=10):
