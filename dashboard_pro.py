@@ -1,5 +1,5 @@
 # ==========================================================
-# ALADDIN 3.2 — MAXI HEDGEFUND (Single-file Streamlit App)
+# ALADDIN 3.2.1 — MAXI HEDGEFUND (Single-file Streamlit App)
 # Minimal Neon UI • Multi-Optimizer • Black-Litterman (cost-aware)
 # Walk-Forward (TC/Liquidity/Almgren–Chriss) • EWMA/Regime 2.0
 # Target-Vol/Lev + Drawdown-Guard + Hedge Overlay (GLD/USD)
@@ -8,21 +8,18 @@
 # Stress (2008/2020/2022) • Rebalance Planner • Paper Broker
 # Presets • Report • AI-Insights (light) • Ensemble Blending
 #
-# NEW (3.2):
-# - Optimizer-Ensemble (MinVol, HRP, Min-CVaR, BL, ERC) + CV-basiertes Blending
-# - ERC (Equal Risk Contribution) & Risk-Budgeting (Gruppen-Risikobeiträge)
-# - Regime-Engine 2.0 (vol/mom/corr) → Modellwahl + Vol-Target-Scaler
-# - Drawdown-Guard (adaptive Leverage) + optional Hedge-Overlay (GLD/FX)
-# - FX-Basis & FX-Hedge (EUR/USD/CHF/GBP) via FX-Serien (EURUSD=X etc.)
-# - PBO/Reality-Check für Strategie-Selektion (Ensemble vs. Einzel)
-# - Almgren–Chriss light (temp & perm Impact) in Walk-Forward-TC
-# - Noch robustere Loader + I/O + saubere Fallbacks
+# HOTFIX 3.2.1:
+# - Python <=3.9 kompatible Typ-Hints (Union/Optional statt |)
+# - Pandas >=2: weekly_dates() Fix (isocalendar().week.astype(int))
+# - Benchmark-Block zurück in Backtest-Tab
+# - Walk-Forward: impact_k-Param korrekt verwendet
+# - Kleine Robustheits-Fixes und UI-Polish
 # ==========================================================
 
 import io, json, math, time, warnings, random
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -118,7 +115,7 @@ st.markdown('<div class="background-grid"></div>', unsafe_allow_html=True)
 
 # ---------- Assets & FX ----------
 ASSET_MAP: Dict[str, str] = {
-    "BTCSD": "BTC-USD",          # Friendly "BTCSD" → echter Ticker BTC-USD
+    "BTCSD": "BTC-USD",          # (Label bleibt "BTCSD", mappt korrekt auf BTC-USD)
     "ETHUSD": "ETH-USD",
     "SOLUSD": "SOL-USD",
     "Apple": "AAPL",
@@ -131,23 +128,14 @@ ASSET_MAP: Dict[str, str] = {
     "STARLINK (SPACE X)": "UFO", # Procure Space ETF
 }
 FRIENDLY_ORDER = [
-    "BTCSD",
-    "ETHUSD",
-    "SOLUSD",
-    "Apple",
-    "Tesla",
-    "Gold",
-    "NVIDIA",
-    "NASDAQ",
-    "S&P 500",
-    "MSCI World ETF",
-    "STARLINK (SPACE X)",
+    "BTCSD","ETHUSD","SOLUSD","Apple","Tesla","Gold",
+    "NVIDIA","NASDAQ","S&P 500","MSCI World ETF","STARLINK (SPACE X)",
 ]
 
-# Group tags
+# Groups
 CRYPTOS = {"BTC-USD","ETH-USD","SOL-USD"}
 EQUITIES = {"AAPL","TSLA","NVDA","QQQ","SPY","URTH","UFO"}
-HEDGE_TICKERS = {"GLD"}  # gold overlay candidate
+HEDGE_TICKERS = {"GLD"}
 
 # FX symbols (yfinance):
 FX_BASES = {
@@ -211,14 +199,11 @@ def ewma_cov(returns: pd.DataFrame, lam: float = 0.94) -> pd.DataFrame:
     return pd.DataFrame(S, index=returns.columns, columns=returns.columns)
 
 def corr_regime(returns: pd.DataFrame, lookback:int=63) -> float:
-    if returns is None or returns.empty:
-        return 0.0
+    if returns is None or returns.empty: return 0.0
     lb = min(lookback, len(returns))
-    if lb < 3:
-        return 0.0
+    if lb < 3: return 0.0
     c = returns.tail(lb).corr().values
-    if c.size == 0:
-        return 0.0
+    if c.size == 0: return 0.0
     iu = np.triu_indices_from(c, 1)
     return float(np.nanmean(c[iu])) if len(iu[0]) else 0.0
 
@@ -227,26 +212,20 @@ def regime_tag(returns: pd.DataFrame,
                thr_vol:float=0.025, thr_corr:float=0.40) -> str:
     if returns is None or returns.empty or len(returns) < 3:
         return "unknown"
-
     vol_df = returns.rolling(lb_vol).std()
     if vol_df.dropna(how="all").shape[0] > 0 and not vol_df.dropna(how="all").tail(1).empty:
         vol = float(vol_df.dropna(how="all").tail(1).mean(axis=1).iloc[0])
     else:
         vol = float(returns.std(ddof=0).mean())
-
     cs_mean = returns.mean(axis=1)
     mom_roll = cs_mean.rolling(lb_mom).mean()
     if mom_roll.dropna().shape[0] > 0 and not mom_roll.dropna().tail(1).empty:
         mom = float(mom_roll.dropna().tail(1).iloc[0])
     else:
         mom = float(cs_mean.mean())
-
     acorr = corr_regime(returns, lookback=lb_mom)
-
-    if vol > thr_vol and acorr > thr_corr:
-        return "high-vol"
-    if mom < 0:
-        return "bear"
+    if vol > thr_vol and acorr > thr_corr: return "high-vol"
+    if mom < 0: return "bear"
     return "normal"
 
 def sparkline(series: pd.Series, height=60):
@@ -504,7 +483,7 @@ def enforce_risk_budget(weights: pd.Series, returns: pd.DataFrame, group_caps: D
                 w[groups[g]] *= factor
                 scaled = True
         if not scaled: break
-        w = np.clip(w, 0, None); 
+        w = np.clip(w, 0, None)
         if w.sum()>0: w /= w.sum()
     return pd.Series(w, index=weights.index)
 
@@ -734,8 +713,7 @@ def ensemble_blend(px_hist: pd.DataFrame, returns: pd.DataFrame) -> Tuple[pd.Ser
     for i in range(k):
         start = i*fold_size; end = (i+1)*fold_size if i<k-1 else len(idx)
         te_idx = idx[start:end]
-        pre_end = max(0, start-embargo); post_start = min(len(idx), end+embargo)
-        _ = idx[:pre_end].append(idx[post_start:])  # train (unused in this light blend)
+        _ = idx[:max(0, start-embargo)].append(idx[min(len(idx), end+embargo):])  # train (light)
         feats = []
         for o,w in models.items():
             r_te = returns.loc[te_idx].reindex(columns=w.index).fillna(0.0).dot(w.values)
@@ -931,17 +909,23 @@ with tab_risk:
 
 # ---------- Backtest (Walk-Forward, AC model) ----------
 def monthly_dates(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
-    g = pd.Series(index=index, data=True); return g.groupby([index.year, index.month]).head(1).index
+    # erster Handelstag je Monat
+    g = pd.Series(True, index=index)
+    return g.groupby([index.year, index.month]).head(1).index
+
 def weekly_dates(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
-    g = pd.Series(index=index, data=True); return g.groupby([index.year, index.isocalendar().week]).head(1).index
+    # erster Handelstag je ISO-Woche (pandas>=2 kompatibel)
+    iso_week = index.isocalendar().week.astype(int)
+    g = pd.Series(True, index=index)
+    return g.groupby([index.year, iso_week]).head(1).index
 
 def almgren_chriss_cost(trade_frac: pd.Series, eq: float, adv_notional: pd.Series, slices:int, ac_temp:float, ac_perm:float) -> float:
     if trade_frac.sum()<=0: return 0.0
-    notional = trade_frac * eq
+    notional = (trade_frac * eq).fillna(0.0)
     cap = adv_notional.replace(0, np.nan)
     ratio = (notional / cap).clip(lower=0.0)
-    temp = (ac_temp/10000.0) * np.nansum(np.sqrt(ratio) / max(1, slices))
-    perm = (ac_perm/10000.0) * np.nansum(ratio)
+    temp = (ac_temp/10000.0) * float(np.nansum(np.sqrt(ratio) / max(1, slices)))
+    perm = (ac_perm/10000.0) * float(np.nansum(ratio))
     return float(temp + perm)
 
 def rebalance_backtest(px: pd.DataFrame, rets: pd.DataFrame, vol_df: pd.DataFrame, dates: pd.DatetimeIndex,
@@ -958,7 +942,7 @@ def rebalance_backtest(px: pd.DataFrame, rets: pd.DataFrame, vol_df: pd.DataFram
     w_prev = None; eq_path, tc_series = [], []
     equity = 1.0
     adv = (vol_df.rolling(adv_days).mean() * px).fillna(0.0)  # notional ADV
-    cum_equity = 1.0; cum_peak = 1.0
+    cum_peak = 1.0
     for dt in rets.index:
         if dt in dates:
             px_hist = px.loc[:dt].dropna()
@@ -991,7 +975,8 @@ def rebalance_backtest(px: pd.DataFrame, rets: pd.DataFrame, vol_df: pd.DataFram
                 imp = pd.Series(0.0, index=w.index, dtype=float)
                 if mask.any():
                     z = traded_notional[mask] / max_notional[mask].replace(0,np.nan)
-                    imp.loc[mask] = (base_bps/10000.0) + (wf_impact_k/10000.0) * np.sqrt(z.clip(lower=0.0).fillna(0.0))
+                    # FIX: impact_k-Param verwenden (nicht globale wf_impact_k)
+                    imp.loc[mask] = (base_bps/10000.0) + (impact_k/10000.0) * np.sqrt(z.clip(lower=0.0).fillna(0.0))
                 else:
                     imp += (base_bps/10000.0)
                 tc_legacy = float(imp.fillna(base_bps/10000.0).sum())
@@ -999,7 +984,7 @@ def rebalance_backtest(px: pd.DataFrame, rets: pd.DataFrame, vol_df: pd.DataFram
                 tc = tc_legacy + tc_ac
                 equity *= (1.0 - tc); tc_series.append((dt, tc))
                 w = w_prev + np.sign(w - w_prev) * delta
-                w = w / w.sum()
+                if w.sum() > 0: w = w / w.sum()
             w_prev = w.copy()
 
         if w_prev is None:
@@ -1017,7 +1002,7 @@ def rebalance_backtest(px: pd.DataFrame, rets: pd.DataFrame, vol_df: pd.DataFram
             guard = max(0.3, 1.0 - dd_strength * (over/max(1e-6, dd_thr)))
         r_core = float(rets.loc[dt].reindex(w_prev.index).fillna(0.0).dot(w_prev.values))
         r = r_core
-        if base_ccy != "USD": r += fx_ret.reindex([dt]).fillna(0.0).iloc[0] * 0.0  # already handled ex-ante
+        # FX bereits ex-ante gehandhabt
 
         if hedge_overlay_on and (dd < -dd_thr):
             r += 0.05 * float(rets.get("GLD", pd.Series(0.0, index=[dt])).reindex([dt]).fillna(0.0).iloc[0])
@@ -1052,70 +1037,71 @@ with tab_backtest:
         ac_temp=ac_temp, ac_perm=ac_perm, ac_slices=ac_slices
     )
 
-# -------- Benchmark robust laden & in Basiswährung bringen --------
-bench_ticker = st.selectbox("Benchmark", ["SPY", "QQQ", "URTH", "GLD"], index=0, key="bench")
+    # -------- Benchmark robust laden & in Basiswährung bringen (IM TAB) --------
+    bench_ticker = st.selectbox("Benchmark", ["SPY", "QQQ", "URTH", "GLD"], index=0, key="bench")
 
-def _force_series(obj: pd.DataFrame | pd.Series, prefer_col: str | None = None) -> pd.Series:
-    if isinstance(obj, pd.DataFrame):
-        if prefer_col is not None and prefer_col in obj.columns:
-            s = obj[prefer_col]
-        else:
-            s = obj.iloc[:, 0]
-        return pd.Series(s).dropna()
-    return pd.Series(obj).dropna()
+    def _force_series(obj: Union[pd.DataFrame, pd.Series], prefer_col: Optional[str] = None) -> pd.Series:
+        if isinstance(obj, pd.DataFrame):
+            if prefer_col is not None and prefer_col in obj.columns:
+                s = obj[prefer_col]
+            else:
+                s = obj.iloc[:, 0]
+            return pd.Series(s).dropna()
+        return pd.Series(obj).dropna()
 
-try:
-    bench_raw = _download_with_retry(bench_ticker, period=f"{bt_years}y")
-    bench_df  = _normalize_price_frame(bench_raw)
-    bench_usd = _force_series(bench_df, prefer_col="Close" if "Close" in getattr(bench_df, "columns", []) else bench_ticker)
-except Exception:
     try:
-        bench_usd = yf.download(bench_ticker, period=f"{bt_years}y",
-                                auto_adjust=True, progress=False)["Close"].dropna()
+        bench_raw = _download_with_retry(bench_ticker, period=f"{bt_years}y")
+        bench_df  = _normalize_price_frame(bench_raw)
+        # bevorzugt "Adj Close", sonst erste Spalte
+        bench_usd = _force_series(bench_df, prefer_col="Adj Close" if "Adj Close" in getattr(bench_df, "columns", []) else None)
     except Exception:
-        bench_usd = pd.Series(dtype=float)
+        try:
+            bench_usd = yf.download(bench_ticker, period=f"{bt_years}y",
+                                    auto_adjust=True, progress=False)["Close"].dropna()
+        except Exception:
+            bench_usd = pd.Series(dtype=float)
 
-fx_bench = fx_series(base_ccy, bench_usd.index)
-bench_px  = bench_usd / fx_bench
+    fx_bench = fx_series(base_ccy, bench_usd.index)
+    bench_px  = bench_usd / fx_bench
 
-common = eq.index.intersection(bench_px.index)
+    common = eq.index.intersection(bench_px.index)
 
-if len(common) >= 2:
-    port_eq  = (eq.loc[common] / float(eq.loc[common].iloc[0])).astype(float)
-    bench_eq = (bench_px.loc[common] / float(bench_px.loc[common].iloc[0])).astype(float)
+    if len(common) >= 2:
+        port_eq  = (eq.loc[common] / float(eq.loc[common].iloc[0])).astype(float)
+        bench_eq = (bench_px.loc[common] / float(bench_px.loc[common].iloc[0])).astype(float)
 
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=common, y=port_eq.values,  name="Portfolio", mode="lines"))
-    fig.add_trace(go.Scatter(x=common, y=bench_eq.values, name=bench_ticker, mode="lines"))
-    fig.update_layout(title="Index (Start=1.0)", xaxis_title="Date", yaxis_title="Index",
-                      height=420, template="aladdin")
-    st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CFG)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=common, y=port_eq.values,  name="Portfolio", mode="lines"))
+        fig.add_trace(go.Scatter(x=common, y=bench_eq.values, name=bench_ticker, mode="lines"))
+        fig.update_layout(title="Index (Start=1.0)", xaxis_title="Date", yaxis_title="Index",
+                          height=420, template="aladdin")
+        st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CFG)
 
-    bt_ret = eq.pct_change().dropna()
-    n = len(bt_ret) if len(bt_ret) else 1
-    bt_cagr = (eq.iloc[-1] ** (252/n)) - 1 if len(eq) else 0.0
-    bt_vol  = bt_ret.std() * np.sqrt(252) if len(bt_ret) else 0.0
-    bt_sha  = (bt_ret.mean()/bt_ret.std()) * np.sqrt(252) if len(bt_ret) and bt_ret.std()!=0 else 0.0
-    bt_mdd  = float((eq/eq.cummax() - 1.0).min()) if len(eq) else 0.0
-    tc_ann  = float(tc_series.mean()*252) if len(tc_series) else 0.0
+        bt_ret = eq.pct_change().dropna()
+        n = len(bt_ret) if len(bt_ret) else 1
+        bt_cagr = (eq.iloc[-1] ** (252/n)) - 1 if len(eq) else 0.0
+        bt_vol  = bt_ret.std() * np.sqrt(252) if len(bt_ret) else 0.0
+        bt_sha  = (bt_ret.mean()/bt_ret.std()) * np.sqrt(252) if len(bt_ret) and bt_ret.std()!=0 else 0.0
+        bt_mdd  = float((eq/eq.cummax() - 1.0).min()) if len(eq) else 0.0
+        tc_ann  = float(tc_series.mean()*252) if len(tc_series) else 0.0
 
-    c1,c2,c3,c4,c5 = st.columns(5)
-    c1.metric("Backtest CAGR", f"{bt_cagr:.2%}")
-    c2.metric("Backtest Vol", f"{bt_vol:.2%}")
-    c3.metric("Backtest Sharpe", f"{bt_sha:.2f}")
-    c4.metric("Backtest MaxDD", f"{bt_mdd:.2%}")
-    c5.metric("Avg TC (ann.)", f"{tc_ann:.2%}")
+        c1,c2,c3,c4,c5 = st.columns(5)
+        c1.metric("Backtest CAGR", f"{bt_cagr:.2%}")
+        c2.metric("Backtest Vol", f"{bt_vol:.2%}")
+        c3.metric("Backtest Sharpe", f"{bt_sha:.2f}")
+        c4.metric("Backtest MaxDD", f"{bt_mdd:.2%}")
+        c5.metric("Avg TC (ann.)", f"{tc_ann:.2%}")
 
-    last_port  = float(port_eq.iloc[-1])
-    last_bench = float(bench_eq.iloc[-1])
-    outp = last_port / last_bench - 1.0
-    st.markdown(f"**Outperformance vs {bench_ticker}: {outp:.2%}**")
-else:
-    st.info("Benchmark-Zeitreihe zu kurz oder keine Überschneidung mit Portfolio-History.")
+        last_port  = float(port_eq.iloc[-1])
+        last_bench = float(bench_eq.iloc[-1])
+        outp = last_port / last_bench - 1.0
+        st.markdown(f"**Outperformance vs {bench_ticker}: {outp:.2%}**")
+    else:
+        st.info("Benchmark-Zeitreihe zu kurz oder keine Überschneidung mit Portfolio-History.")
 
 # ---------- CV & Deflated Sharpe ----------
 def time_series_folds(index: pd.DatetimeIndex, k: int=5, embargo: int=10):
-    n = len(index); fold_size = n // k
+    n = len(index); fold_size = max(1, n // k)
     for i in range(k):
         start = i*fold_size; end = (i+1)*fold_size if i<k-1 else n
         test_idx = index[start:end]
@@ -1208,7 +1194,7 @@ with tab_factors:
         X_ = np.column_stack([np.ones(len(X)), X.values])
         coef, *_ = np.linalg.lstsq(X_, y.values, rcond=None)
         pred = X_ @ coef
-        ss_res = np.sum((y.values - pred)**2); ss_tot = np.sum((y.values - y.values.mean())**2)
+        ss_res = float(np.sum((y.values - pred)**2)); ss_tot = float(np.sum((y.values - y.values.mean())**2))
         r2 = 0.0 if ss_tot==0 else 1 - ss_res/ss_tot
         for i, kf in enumerate(X.columns, start=1): beta[kf] = float(coef[i])
 
