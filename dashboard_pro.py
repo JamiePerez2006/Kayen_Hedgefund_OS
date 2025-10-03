@@ -1064,33 +1064,63 @@ def rebalance_backtest(px: pd.DataFrame, rets: pd.DataFrame, vol_df: pd.DataFram
                 w = apply_caps(w_all, crypto_cap, equity_cap, single_cap)
                 if w.sum() > 0: w = w / w.sum()
 
-            if w_prev is not None:
-                delta = (w - w_prev).abs()
-                delta = delta.where(delta >= min_trade, 0.0)
-                adv_now = adv.reindex(index=[dt]).ffill().iloc[0].reindex(w.index).replace(0, np.nan)
-                desired_notional = delta * equity
-                max_notional = (max_pct_adv/100.0) * adv_now
-                scale = 1.0
-                mask = (~max_notional.isna()) & (max_notional>0)
-                if mask.any():
-                    ratio = (desired_notional[mask] / max_notional[mask]).max()
-                    if ratio > 1.0: scale = 1.0/float(ratio)
-                delta *= scale
-                if float(delta.sum()) > turnover_cap:
-                    delta = delta * (turnover_cap / float(delta.sum()))
-                traded_notional = delta * equity
-                imp = pd.Series(0.0, index=w.index, dtype=float)
-                if mask.any():
-                    z = traded_notional[mask] / max_notional[mask].replace(0,np.nan)
-                    imp.loc[mask] = (base_bps/10000.0) + (impact_k/10000.0) * np.sqrt(z.clip(lower=0.0).fillna(0.0))
-                else:
-                    imp += (base_bps/10000.0)
-                tc_legacy = float(imp.fillna(base_bps/10000.0).sum())
-                tc_ac = almgren_chriss_cost(delta, equity, max_notional, ac_slices, ac_temp, ac_perm)
-                tc = tc_legacy + tc_ac
-                equity *= (1.0 - tc); tc_series.append((dt, tc))
-                w = w_prev + np.sign(w - w_prev) * delta
-                w = w / w.sum()
+                if w_prev is not None:
+            # --- Turnover vs ADV ---
+            delta = (w - w_prev).abs()
+            delta = delta.where(delta >= min_trade, 0.0)  # kleine Trades ignorieren
+            traded_mask = delta > 0
+
+            # ADV in Notional-$ (Durchschnitt Vol * Price), auf heutigen Tag gemappt
+            adv_now = (vol_df.rolling(adv_days).mean() * px).ffill().reindex(index=[dt]).iloc[0]
+            adv_now = adv_now.reindex(w.index).replace(0, np.nan)
+
+            # gewünschter gehandelter Anteil am Portfolio (= Δw)
+            desired_frac = delta.copy()
+
+            # ADV-Limiter: pro Asset max %ADV
+            max_notional = (max_pct_adv/100.0) * adv_now
+            scale = 1.0
+            mask_cap = traded_mask & (~max_notional.isna()) & (max_notional > 0)
+            if mask_cap.any():
+                # Verhältnis gewünschtes Notional / zulässiges Notional
+                ratio = (desired_frac[mask_cap] * equity / max_notional[mask_cap]).max()
+                if ratio > 1.0:
+                    scale = float(1.0 / ratio)
+
+            # Portfolioweiter Turnover-Cap
+            delta_exec = desired_frac * scale
+            tot_to = float(delta_exec.sum())
+            if tot_to > turnover_cap:
+                delta_exec *= (turnover_cap / tot_to)
+
+            # --- Transaktionskosten als FRAKTION der Equity ---
+            # Basis-bps + Impact-bps (sqrt-Formel). NUR auf tatsächlich gehandelte Assets.
+            imp = pd.Series(0.0, index=w.index, dtype=float)
+            if mask_cap.any():
+                z = (delta_exec[mask_cap] * equity) / max_notional[mask_cap].replace(0, np.nan)
+                imp.loc[mask_cap] = (base_bps/10000.0) + (impact_k/10000.0) * np.sqrt(z.clip(lower=0.0).fillna(0.0))
+            imp = imp.where(delta_exec > 0, 0.0)
+
+            # *** richtig: Kosten = Summe(bps_i * Delta_i) ***
+            tc_legacy = float((imp * delta_exec).sum())
+
+            # Almgren–Chriss (bp pro %ADV) → ebenfalls als Fraktion
+            adv_now_safe = max_notional  # dient zugleich als ADV-Proxy
+            tc_ac = almgren_chriss_cost(
+                trade_frac=delta_exec, eq=equity, adv_notional=adv_now_safe,
+                slices=ac_slices, ac_temp=ac_temp, ac_perm=ac_perm
+            )
+
+            tc = max(0.0, tc_legacy + tc_ac)
+            tc = min(tc, 0.05)  # Safety-Cap: nie > 5% pro Rebalance
+
+            # Equity nach Kosten reduzieren
+            equity *= (1.0 - tc)
+
+            # Gewichte nach Ausführung: nur um die tatsächlich gehandelten Deltas verschieben
+            signed = np.sign(w - w_prev).fillna(0.0)
+            w = (w_prev + signed * delta_exec)
+            w = w / w.sum()
             w_prev = w.copy()
 
         if w_prev is None:
