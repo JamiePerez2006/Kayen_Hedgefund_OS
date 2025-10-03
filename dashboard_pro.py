@@ -1,25 +1,29 @@
 # ==========================================================
-# ALADDIN 3.2.1 — MAXI HEDGEFUND (Single-file Streamlit App)
+# ALADDIN 3.3 — MAXI HEDGEFUND (Single-file Streamlit App)
+# Robust Regime Switch • Risk/Defensive Sleeve • Trend-Gate
 # Minimal Neon UI • Multi-Optimizer • Black-Litterman (cost-aware)
-# Walk-Forward (TC/Liquidity/Almgren–Chriss) • EWMA/Regime 2.0
-# Target-Vol/Lev + Drawdown-Guard + Hedge Overlay (GLD/USD)
+# Walk-Forward (TC/Liquidity/Almgren–Chriss) • EWMA/Regime 2.1
+# Target-Vol/Lev + Stronger Drawdown-Guard + Hedge Overlay (GLD/USD)
 # Momentum Tilt • Purged K-Fold CV • Deflated Sharpe • PBO
 # FX Base (EUR/USD/CHF/GBP) + FX-Hedge • Risk Budgeting
 # Stress (2008/2020/2022) • Rebalance Planner • Paper Broker
-# Presets • Report • AI-Insights (light) • Ensemble Blending
+# Presets • Report • AI-Insights (light) • Ensemble Blending (ridge)
 #
-# HOTFIX 3.2.1:
-# - Python <=3.9 kompatible Typ-Hints (Union/Optional statt |)
-# - Pandas >=2: weekly_dates() Fix (isocalendar().week.astype(int))
-# - Benchmark-Block zurück in Backtest-Tab
-# - Walk-Forward: impact_k-Param korrekt verwendet
-# - Kleine Robustheits-Fixes und UI-Polish
+# NEW (3.3) — Performance/Robustness Fokus:
+# - Risk/Defensive 2-Sleeve: Risiko-Sleeve (Equity+Crypto) vs Defensive (IEF/TLT/SHY/BIL/GLD)
+#   → adaptives Mix-Gewicht via Trend/Regime (SPY>200d, Vol, Corr)
+# - Trend-Gate: negative 6–12M-Momentum Assets werden auf 0..X% gedimmt (Crash-Protection)
+# - Ensemble (ridge-like): Gewichte ~ exp(recent Sharpe 63d), capped, stabiler als simple CV-Mittel
+# - Crash-Switch (hart): bei starkem Risk-Off wird Equity+Crypto aggressiv gekappt
+# - Härterer DD-Governor: zusätzlicher Return-Heat-Check (60d); Leverage/Overlay runter
+# - Bond/Cash Sleeve: fügt IEF, TLT, SHY, BIL hinzu (mehr echte Defense)
+# - Saubere Fallbacks, keine externen Pflichtlibs nötig
 # ==========================================================
 
 import io, json, math, time, warnings, random
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Optional, Union
+from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -32,7 +36,7 @@ import matplotlib.pyplot as plt
 warnings.filterwarnings("ignore")
 
 # ---------- Page / Theme ----------
-st.set_page_config(page_title="ALADDIN 3.2 — MAXI HEDGEFUND", layout="wide")
+st.set_page_config(page_title="ALADDIN 3.3 — MAXI HEDGEFUND", layout="wide")
 
 pio.templates["aladdin"] = go.layout.Template(
     layout=go.Layout(
@@ -61,8 +65,6 @@ CUSTOM_CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
 html, body, [class*="css"] { font-family: 'Inter', system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
-
-/* Minimal Neon Background: mesh + grid + glow */
 body {
   background:
     radial-gradient(1200px 600px at 10% -10%, rgba(34,211,238,.08), transparent 60%),
@@ -80,12 +82,8 @@ body {
   background-size: 34px 34px, 34px 34px; opacity:.7;
   mask-image: radial-gradient(circle at 50% 40%, rgba(255,255,255,.35), transparent 55%);
 }
-
-/* Layout polish */
 .block-container { padding-top: 0.8rem; padding-bottom: 1.2rem; }
 h1,h2,h3 { letter-spacing:.3px; }
-
-/* Glass KPI cards with neon glow on hover */
 .kpi-card {
   background: var(--card); border:1px solid var(--border);
   border-radius:14px; padding:16px 18px; box-shadow:0 12px 30px rgba(0,0,0,.30);
@@ -96,17 +94,11 @@ h1,h2,h3 { letter-spacing:.3px; }
 .kpi-label { color:#95a3b3; font-size:.92rem; }
 hr { border:none; height:1px; background:linear-gradient(90deg,transparent,rgba(255,255,255,.10),transparent); margin:12px 0 18px; }
 .smallnote { color:#93a1b1; font-size:.9rem; }
-
-/* DataFrames & Buttons */
 .stDataFrame { border:1px solid var(--border); border-radius:12px; overflow:hidden; }
 .stButton>button { border-radius:10px; }
-
-/* Tabs: sticky + pill look */
 .stTabs [data-baseweb="tab-list"] { gap: 6px; position: sticky; top: 0; z-index: 10; }
 .stTabs [data-baseweb="tab"] { background: rgba(255,255,255,.06); border-radius: 10px; padding: 8px 12px; }
 .stTabs [aria-selected="true"] { background: rgba(34,211,238,.14); border:1px solid rgba(34,211,238,.35); }
-
-/* Card section */
 .section { border:1px solid var(--border); border-radius:14px; padding:16px; background: var(--card); }
 </style>
 """
@@ -115,35 +107,37 @@ st.markdown('<div class="background-grid"></div>', unsafe_allow_html=True)
 
 # ---------- Assets & FX ----------
 ASSET_MAP: Dict[str, str] = {
-    "BTCSD": "BTC-USD",          # (Label bleibt "BTCSD", mappt korrekt auf BTC-USD)
+    "BTCSD": "BTC-USD",
     "ETHUSD": "ETH-USD",
     "SOLUSD": "SOL-USD",
     "Apple": "AAPL",
     "Tesla": "TSLA",
     "Gold": "GLD",
     "NVIDIA": "NVDA",
-    "NASDAQ": "QQQ",             # Nasdaq-100 proxy
-    "S&P 500": "SPY",            # S&P 500 proxy
+    "NASDAQ": "QQQ",
+    "S&P 500": "SPY",
     "MSCI World ETF": "URTH",
-    "STARLINK (SPACE X)": "UFO", # Procure Space ETF
+    "STARLINK (SPACE X)": "UFO",
+    # NEW defensive sleeve
+    "US 7-10Y (IEF)": "IEF",
+    "US 20Y (TLT)": "TLT",
+    "US 1-3Y (SHY)": "SHY",
+    "T-Bill (BIL)": "BIL",
 }
 FRIENDLY_ORDER = [
-    "BTCSD","ETHUSD","SOLUSD","Apple","Tesla","Gold",
-    "NVIDIA","NASDAQ","S&P 500","MSCI World ETF","STARLINK (SPACE X)",
+    "BTCSD","ETHUSD","SOLUSD","Apple","Tesla","Gold","NVIDIA","NASDAQ","S&P 500","MSCI World ETF","STARLINK (SPACE X)",
+    "US 7-10Y (IEF)","US 20Y (TLT)","US 1-3Y (SHY)","T-Bill (BIL)",
 ]
 
 # Groups
 CRYPTOS = {"BTC-USD","ETH-USD","SOL-USD"}
 EQUITIES = {"AAPL","TSLA","NVDA","QQQ","SPY","URTH","UFO"}
+BONDS = {"IEF","TLT","SHY","BIL"}
+DEFENSIVE = {"GLD","IEF","TLT","SHY","BIL"}  # used for defensive sleeve
 HEDGE_TICKERS = {"GLD"}
 
-# FX symbols (yfinance):
-FX_BASES = {
-    "EUR": "EURUSD=X",  # USD per EUR
-    "USD": None,
-    "CHF": "CHFUSD=X",
-    "GBP": "GBPUSD=X"
-}
+# FX symbols (yfinance)
+FX_BASES = {"EUR":"EURUSD=X","USD":None,"CHF":"CHFUSD=X","GBP":"GBPUSD=X"}
 
 # ---------- Utils & Risk ----------
 def set_global_seed(seed:int=42):
@@ -213,16 +207,10 @@ def regime_tag(returns: pd.DataFrame,
     if returns is None or returns.empty or len(returns) < 3:
         return "unknown"
     vol_df = returns.rolling(lb_vol).std()
-    if vol_df.dropna(how="all").shape[0] > 0 and not vol_df.dropna(how="all").tail(1).empty:
-        vol = float(vol_df.dropna(how="all").tail(1).mean(axis=1).iloc[0])
-    else:
-        vol = float(returns.std(ddof=0).mean())
+    vol = float(vol_df.dropna(how="all").tail(1).mean(axis=1).iloc[0]) if vol_df.dropna(how="all").shape[0]>0 else float(returns.std(ddof=0).mean())
     cs_mean = returns.mean(axis=1)
     mom_roll = cs_mean.rolling(lb_mom).mean()
-    if mom_roll.dropna().shape[0] > 0 and not mom_roll.dropna().tail(1).empty:
-        mom = float(mom_roll.dropna().tail(1).iloc[0])
-    else:
-        mom = float(cs_mean.mean())
+    mom = float(mom_roll.dropna().tail(1).iloc[0]) if mom_roll.dropna().shape[0]>0 else float(cs_mean.mean())
     acorr = corr_regime(returns, lookback=lb_mom)
     if vol > thr_vol and acorr > thr_corr: return "high-vol"
     if mom < 0: return "bear"
@@ -483,14 +471,32 @@ def enforce_risk_budget(weights: pd.Series, returns: pd.DataFrame, group_caps: D
                 w[groups[g]] *= factor
                 scaled = True
         if not scaled: break
-        w = np.clip(w, 0, None)
+        w = np.clip(w, 0, None); 
         if w.sum()>0: w /= w.sum()
     return pd.Series(w, index=weights.index)
+
+# ---------- NEW: Trend/Regime helpers ----------
+def sma(series: pd.Series, n:int=200) -> pd.Series:
+    return series.rolling(n).mean()
+
+def trend_score(px: pd.Series, lb_short:int=63, lb_long:int=252) -> float:
+    if len(px) < lb_long+5: return 0.0
+    r6 = px.pct_change(lb_short).iloc[-1]
+    r12 = px.pct_change(lb_long).iloc[-1]
+    s = 0.5*np.sign(r6) + 0.5*np.sign(r12)
+    return float(s)
+
+def tsmom_mask(px_df: pd.DataFrame, lookback:int=126) -> pd.Series:
+    if px_df.shape[0] < lookback+1: 
+        return pd.Series(1.0, index=px_df.columns, dtype=float)
+    mom = (px_df.iloc[-1]/px_df.iloc[-lookback-1] - 1.0).reindex(px_df.columns).fillna(0.0)
+    mask = (mom > 0).astype(float)
+    return mask
 
 # ---------- UI Header ----------
 colH1, colH2 = st.columns([0.8, 0.2])
 with colH1:
-    st.title("ALADDIN 3.2 — MAXI HEDGEFUND")
+    st.title("ALADDIN 3.3 — MAXI HEDGEFUND")
     st.caption(datetime.now().strftime("%d.%m.%Y %H:%M"))
 with colH2:
     st.markdown("<div class='section' style='text-align:center;'>🌐<br/>Neon Mode</div>", unsafe_allow_html=True)
@@ -504,7 +510,10 @@ with colA:
 with colB:
     preset_toggle = st.checkbox("Use KAYEN preset", value=True)
 
-DEFAULT_FRIENDLY = ["BTCSD","ETHUSD","SOLUSD","Apple","Tesla","Gold","NVIDIA","NASDAQ","S&P 500","MSCI World ETF","STARLINK (SPACE X)"]
+DEFAULT_FRIENDLY = [
+    "BTCSD","ETHUSD","SOLUSD","Apple","Tesla","Gold","NVIDIA","NASDAQ","S&P 500","MSCI World ETF","STARLINK (SPACE X)",
+    "US 7-10Y (IEF)","US 20Y (TLT)","US 1-3Y (SHY)","T-Bill (BIL)"
+]
 friendly_selection = st.sidebar.multiselect(
     "Universe (choose from your set)", options=FRIENDLY_ORDER,
     default=DEFAULT_FRIENDLY if preset_toggle else DEFAULT_FRIENDLY
@@ -517,14 +526,14 @@ min_w = st.sidebar.slider("Min weight per asset", 0.00, 0.20, 0.00, step=0.01)
 max_w = st.sidebar.slider("Max weight per asset", 0.10, 0.70, 0.35, step=0.01)
 
 # Caps
-single_cap = st.sidebar.slider("Single-asset cap", 0.10, 1.00, 0.45, step=0.05)
-equity_cap = st.sidebar.slider("Equity cap (group)", 0.10, 1.00, 0.75, step=0.05)
-crypto_cap = st.sidebar.slider("Crypto cap (group)", 0.00, 0.80, 0.20, step=0.01)
+single_cap = st.sidebar.slider("Single-asset cap", 0.10, 1.00, 0.35, step=0.05)
+equity_cap = st.sidebar.slider("Equity cap (group)", 0.10, 1.00, 0.60, step=0.05)
+crypto_cap = st.sidebar.slider("Crypto cap (group)", 0.00, 0.80, 0.15, step=0.01)
 
 # Risk Budgeting caps (on risk contributions)
 st.sidebar.markdown("**Risk Budgeting (RC caps)**")
-rb_crypto = st.sidebar.slider("Crypto RC cap", 0.00, 0.80, 0.35, step=0.05)
-rb_equity = st.sidebar.slider("Equity RC cap", 0.10, 1.00, 0.80, step=0.05)
+rb_crypto = st.sidebar.slider("Crypto RC cap", 0.00, 0.80, 0.30, step=0.05)
+rb_equity = st.sidebar.slider("Equity RC cap", 0.10, 1.00, 0.70, step=0.05)
 
 alpha = st.sidebar.slider("Risk alpha (VaR/CVaR)", 0.90, 0.99, 0.95, step=0.01)
 allow_short = st.sidebar.checkbox("Allow short (experimental)", value=False)
@@ -538,13 +547,24 @@ fx_hedge_ratio = st.sidebar.slider("FX hedge ratio (USD exposure)", 0.0, 1.0, 0.
 # Target-Vol + Leverage + Drawdown Guard
 target_vol = st.sidebar.slider("Target annualized vol", 0.05, 0.40, 0.12, step=0.01)
 max_leverage = st.sidebar.slider("Max gross leverage", 1.0, 3.0, 1.6, step=0.1)
-dd_guard_thr = st.sidebar.slider("Drawdown guard threshold", 0.05, 0.30, 0.10, step=0.01)
-dd_guard_strength = st.sidebar.slider("Guard strength", 0.0, 1.0, 0.50, step=0.05)
+dd_guard_thr = st.sidebar.slider("Drawdown guard threshold", 0.05, 0.30, 0.08, step=0.01)
+dd_guard_strength = st.sidebar.slider("Guard strength", 0.0, 1.0, 0.65, step=0.05)
 hedge_overlay_on = st.sidebar.checkbox("Enable Hedge Overlay (GLD + FX)", value=True)
 
-# Momentum Tilt
-mom_strength = st.sidebar.slider("Momentum tilt strength", 0.0, 1.0, 0.30, step=0.05)
+# Momentum Tilt + NEW Trend Gate
+mom_strength = st.sidebar.slider("Momentum tilt strength", 0.0, 1.0, 0.25, step=0.05)
 mom_lb = st.sidebar.selectbox("Momentum lookback", ["6M","9M","12M"], index=2)
+trend_gate = st.sidebar.checkbox("Enable Trend-Gate (TSMOM)", value=True)
+trend_gate_strength = st.sidebar.slider("Trend-Gate damping", 0.0, 1.0, 1.0, step=0.1,
+                                        help="1.0 = hart (negativ → 0), 0.5 = halbe Dimmung")
+
+# NEW Crash switch & sleeve controls
+st.sidebar.markdown("**Regime & Sleeves**")
+sma_len = st.sidebar.slider("Trend SMA (SPY)", 100, 300, 200, step=10)
+risk_sleeve_floor = st.sidebar.slider("Risk-sleeve min share", 0.0, 1.0, 0.15, step=0.05)
+def_sleeve_floor = st.sidebar.slider("Defensive-sleeve min share", 0.0, 1.0, 0.20, step=0.05)
+crash_switch = st.sidebar.checkbox("Hard Crash-Switch (cut risky)", value=True)
+crash_cut = st.sidebar.slider("Crash cut (risky sleeve cap)", 0.05, 0.80, 0.35, step=0.05)
 
 # Optimizer choice (single) + Ensemble blend
 opt_choice = st.sidebar.selectbox("Optimizer", ["Min-Vol", "HRP", "Min-CVaR", "Black-Litterman", "ERC"], index=0)
@@ -601,7 +621,10 @@ if st.sidebar.button("Save current preset"):
         "outlier_thr": outlier_thr,
         "mc_block_bootstrap": mc_block_bootstrap, "mc_block": mc_block, "mc_horizon": mc_horizon,
         "mc_sims": mc_sims,
-        "base_ccy": base_ccy, "fx_hedge_ratio": fx_hedge_ratio
+        "base_ccy": base_ccy, "fx_hedge_ratio": fx_hedge_ratio,
+        "sma_len": sma_len, "risk_sleeve_floor": risk_sleeve_floor, "def_sleeve_floor": def_sleeve_floor,
+        "crash_switch": crash_switch, "crash_cut": crash_cut,
+        "trend_gate": trend_gate, "trend_gate_strength": trend_gate_strength
     }
     st.sidebar.download_button("Download preset.json", data=json.dumps(preset, indent=2).encode(),
                                file_name="preset.json", mime="application/json")
@@ -694,6 +717,7 @@ def run_single_optimizer(name:str, px_hist:pd.DataFrame) -> pd.Series:
 
 OPT_LIST = ["Min-Vol","HRP","Min-CVaR","Black-Litterman","ERC"]
 
+# NEW: ridge-like ensemble using recent Sharpe weights (stabilized)
 def ensemble_blend(px_hist: pd.DataFrame, returns: pd.DataFrame) -> Tuple[pd.Series, Dict[str,float]]:
     models = {}
     for o in OPT_LIST:
@@ -706,80 +730,150 @@ def ensemble_blend(px_hist: pd.DataFrame, returns: pd.DataFrame) -> Tuple[pd.Ser
     if not models:
         return inverse_variance_weights(px_hist, min_w, max_w), { "IV": 1.0 }
 
-    k, embargo = 5, 10
-    idx = returns.index
-    fold_size = len(idx)//k if k>0 else len(idx)
-    X = []
-    for i in range(k):
-        start = i*fold_size; end = (i+1)*fold_size if i<k-1 else len(idx)
-        te_idx = idx[start:end]
-        _ = idx[:max(0, start-embargo)].append(idx[min(len(idx), end+embargo):])  # train (light)
-        feats = []
-        for o,w in models.items():
-            r_te = returns.loc[te_idx].reindex(columns=w.index).fillna(0.0).dot(w.values)
-            sr_te = sharpe_ratio(r_te)
-            feats.append(sr_te)
-        X.append(feats)
-    if not X:
+    # evaluate each model on recent window (63d) for stability
+    look = min(63, len(returns))
+    if look < 20:
         avg = sum(models.values())/len(models)
-        return avg/avg.sum(), {o: 1/len(models) for o in models}
+        avg = avg/avg.sum()
+        return avg, {o:1/len(models) for o in models}
 
-    X = np.array(X)
-    blend = np.ones(X.shape[1]) / X.shape[1]
-    for _ in range(200):
-        grad = np.mean(X, axis=0)
-        blend = blend + 0.1*(grad - np.mean(grad))
-        blend = np.clip(blend, 0, None)
-        if blend.sum()>0: blend/=blend.sum()
+    recent = returns.tail(look)
+    srs = {}
+    for o, w in models.items():
+        r = recent.reindex(columns=w.index).fillna(0.0).dot(w.values)
+        srs[o] = sharpe_ratio(r)
+
+    # ridge-like softmax over Sharpe (clip to avoid dominance)
+    sr_vals = np.array([srs[o] for o in models])
+    sr_vals = np.nan_to_num(sr_vals, nan=0.0, posinf=0.0, neginf=0.0)
+    sr_vals = np.clip(sr_vals, -1.0, 2.0)
+    beta = 2.0
+    expw = np.exp(beta*sr_vals)
+    if expw.sum()<=0: expw = np.ones_like(expw)
+    blend = expw/expw.sum()
 
     w_sum = None
-    for i,(o,w) in enumerate(models.items()):
-        part = blend[i] * w
+    keys = list(models.keys())
+    for i,o in enumerate(keys):
+        part = blend[i]*models[o]
         w_sum = part if w_sum is None else w_sum.add(part, fill_value=0.0)
     w_sum = w_sum.fillna(0.0)
     if w_sum.sum()>0: w_sum/=w_sum.sum()
-    blend_map = {o: float(blend[i]) for i,o in enumerate(models.keys())}
+    blend_map = {o: float(blend[i]) for i,o in enumerate(keys)}
     return w_sum, blend_map
 
-# Select single or ensemble
-if use_ensemble:
-    w_opt_raw, blend_map = ensemble_blend(px_base, rets_base)
-    opt_label = "Ensemble: " + ", ".join([f"{k}:{v:.0%}" for k,v in blend_map.items()])
-else:
-    w_opt_raw = run_single_optimizer(opt_choice, px_base).reindex(px_base.columns).fillna(0.0)
-    if w_opt_raw.sum()>0: w_opt_raw/=w_opt_raw.sum()
-    opt_label = opt_choice
+# ---------- Sleeves & Trend-Gate ----------
+def split_universe(px_hist: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    cols = list(px_hist.columns)
+    risky = [c for c in cols if (c in CRYPTOS or c in EQUITIES)]
+    defens = [c for c in cols if c in DEFENSIVE]
+    if not defens:  # ensure at least GLD present if user removed bonds
+        if "GLD" in cols: defens = ["GLD"]
+    if not risky:  # if no risky, everything defensive
+        defens = cols
+    return px_hist[risky] if risky else px_hist, px_hist[defens] if defens else px_hist
+
+def apply_trend_gate(weights: pd.Series, px_hist: pd.DataFrame, strength: float, lookback:int=126) -> pd.Series:
+    if not trend_gate: return weights
+    mask = tsmom_mask(px_hist, lookback=lookback).reindex(weights.index).fillna(1.0)
+    if strength >= 0.999:
+        gated = weights * mask  # hard: negative trend → zero
+    else:
+        gated = weights * ( (1-strength) + strength*mask )  # soft dimming
+    return gated / (gated.sum() if gated.sum()>0 else 1.0)
+
+# ---------- Build sleeves ----------
+def build_risky_weights(px_hist: pd.DataFrame, returns: pd.DataFrame) -> Tuple[pd.Series,str,dict]:
+    if use_ensemble:
+        w_raw, blend_map = ensemble_blend(px_hist, returns)
+        label = "Ensemble (ridge): " + ", ".join([f"{k}:{v:.0%}" for k,v in blend_map.items()])
+    else:
+        w_raw = run_single_optimizer(opt_choice, px_hist).reindex(px_hist.columns).fillna(0.0)
+        if w_raw.sum()>0: w_raw/=w_raw.sum()
+        label = opt_choice
+        blend_map = {opt_choice:1.0}
+    # momentum tilt
+    lb_map = {"6M":126, "9M":189, "12M":252}; lb = lb_map[mom_lb]
+    mom = (px_hist/px_hist.shift(lb) - 1.0).iloc[-1].reindex(w_raw.index).fillna(0.0)
+    mom_score = (mom.rank(pct=True) - 0.5)
+    w_tilt = w_raw * (1 + mom_strength * mom_score)
+    if w_tilt.sum()>0: w_tilt = w_tilt / w_tilt.sum()
+    # trend gate
+    w_gate = apply_trend_gate(w_tilt, px_hist, strength=trend_gate_strength, lookback=126)
+    return w_gate, label, blend_map
+
+def build_defensive_weights(px_hist: pd.DataFrame) -> pd.Series:
+    # simple Min-Vol / IV blend on defensive set
+    try:
+        w_minv, _ = optimizer_min_vol(px_hist, lb=0.0, ub=1.0, use_ewma=True)
+    except Exception:
+        w_minv = inverse_variance_weights(px_hist, 0.0, 1.0)
+    w_iv = inverse_variance_weights(px_hist, 0.0, 1.0)
+    w = 0.6*w_minv + 0.4*w_iv
+    return w / (w.sum() if w.sum()>0 else 1.0)
+
+# ---------- Select single or sleeves ----------
+risky_cols, defens_cols = None, None
+w_opt_raw = None; opt_label = ""
+if True:
+    # sleeves split
+    risky_df, defens_df = split_universe(px_base)
+    risky_cols = list(risky_df.columns); defens_cols = list(defens_df.columns)
+
+    # risky sleeve
+    wr, label, blend_map = build_risky_weights(risky_df, rets_base[risky_cols].dropna(how="all"))
+    # defensive sleeve
+    wd = build_defensive_weights(defens_df)
+
+    # adaptive sleeve mix via SPY trend & regime
+    spy = px_base.get("SPY", None)
+    if spy is None or spy.isna().all():
+        risk_share = 0.5
+    else:
+        tscore = trend_score(spy, 63, 252)
+        above = 1.0 if spy.iloc[-1] > sma(spy, sma_len).iloc[-1] else 0.0
+        reg = 1.0 if regime=="normal" else (0.5 if regime=="high-vol" else 0.0)
+        risk_share = 0.15 + 0.35*above + 0.30*reg + 0.20*max(0.0, tscore)  # 0..1
+        risk_share = float(np.clip(risk_share, risk_sleeve_floor, 1.0-def_sleeve_floor))
+
+    # optional crash hard cap
+    if crash_switch:
+        if spy is not None and spy.iloc[-1] < sma(spy, sma_len).iloc[-1]:
+            risk_share = min(risk_share, float(crash_cut))
+
+    # assemble portfolio weights across full universe
+    w_all = pd.Series(0.0, index=px_base.columns, dtype=float)
+    w_all.loc[wr.index] = risk_share * wr.values
+    w_all.loc[wd.index] += (1.0 - risk_share) * wd.values
+    w_all = w_all / (w_all.sum() if w_all.sum()>0 else 1.0)
+
+    # caps + risk budgeting on final
+    w_capped = apply_caps(w_all, crypto_cap, equity_cap, single_cap)
+    if w_capped.sum()>0: w_capped/=w_capped.sum()
+    w_opt = enforce_risk_budget(w_capped, rets_base, {"Crypto": rb_crypto, "Equity": rb_equity})
+    if w_opt.sum()>0: w_opt/=w_opt.sum()
+
+    w_opt_raw = w_opt.copy()
+    opt_label = f"Sleeves: Risk({risk_share:.0%})[{label}] + Defensive({1-risk_share:.0%})"
 
 # Optional import blend (user)
 if imp is not None and imp.sum()>0:
     w_opt_raw = (0.7*w_opt_raw + 0.3*imp)
     if w_opt_raw.sum()>0: w_opt_raw/=w_opt_raw.sum()
-
-# Caps + Risk budgeting
-w_capped = apply_caps(w_opt_raw, crypto_cap, equity_cap, single_cap)
-if w_capped.sum()>0: w_capped/=w_capped.sum()
-w_opt = enforce_risk_budget(w_capped, rets_base, {"Crypto": rb_crypto, "Equity": rb_equity})
-if w_opt.sum()>0: w_opt/=w_opt.sum()
-
-# Momentum Tilt
-lb_map = {"6M":126, "9M":189, "12M":252}; lb = lb_map[mom_lb]
-mom = (px_base/px_base.shift(lb) - 1.0).iloc[-1].reindex(w_opt.index).fillna(0.0)
-mom_score = (mom.rank(pct=True) - 0.5)
-w_tilt = w_opt * (1 + mom_strength * mom_score)
-if w_tilt.sum() > 0: w_opt = (w_tilt / w_tilt.sum()).fillna(0.0)
+w_opt = w_opt_raw.copy()
 
 # ---------- Portfolio series (base ccy) & FX-hedge ----------
 port_core = (rets_base.fillna(0.0) @ w_opt.values).rename("Portfolio")
 if base_ccy != "USD" and fx_hedge_ratio > 0:
     port_core = port_core + fx_hedge_ratio * fx_ret.reindex(port_core.index).fillna(0.0)
 
-# Hedge overlay (GLD + extra FX) when enabled & regime/bad DD
+# Hedge overlay (GLD) conditional
 cum_core = (1.0 + port_core).cumprod()
 dd_live = (cum_core/cum_core.cummax()-1.0).iloc[-1]
 hedge_add = 0.0
 if hedge_overlay_on:
     if dd_live < -dd_guard_thr or regime in ["bear","high-vol"]:
-        hedge_add = min(0.10, dd_guard_strength*0.10)  # bis 10% Overlay
+        hedge_add = min(0.10, dd_guard_strength*0.12)
 port = port_core + hedge_add * rets_base.get("GLD", pd.Series(0.0, index=port_core.index)).reindex(port_core.index).fillna(0.0)
 
 cum  = (1.0 + port).cumprod()
@@ -787,13 +881,16 @@ ann_ret, ann_vol = annualize_stats(port)
 sr = sharpe_ratio(port); VaR, ES = hist_var_es(port, alpha=alpha)
 MDD = max_drawdown(cum); skew, kurt = higher_moments(port)
 
-# Risk targeting + Drawdown Guard (adaptive leverage)
+# Risk targeting + Stronger Drawdown Guard (also check 60d heat)
 eps = 1e-8
 lev_base = min(max_leverage, (target_vol_eff / max(eps, ann_vol)))
 guard_scale = 1.0
+roll60 = port.rolling(60).sum().iloc[-1] if len(port)>60 else 0.0
 if dd_live < -dd_guard_thr:
     over = abs(dd_live) - dd_guard_thr
-    guard_scale = max(0.3, 1.0 - dd_guard_strength * (over / max(1e-6, dd_guard_thr)))
+    guard_scale *= max(0.3, 1.0 - dd_guard_strength * (over / max(1e-6, dd_guard_thr)))
+if roll60 < -0.04:   # zusätzlicher De-Risk bei Hitze/Abwärtsphase
+    guard_scale *= 0.75
 scale_live = max(0.1, lev_base * guard_scale)
 
 port_eff = port * scale_live
@@ -909,23 +1006,17 @@ with tab_risk:
 
 # ---------- Backtest (Walk-Forward, AC model) ----------
 def monthly_dates(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
-    # erster Handelstag je Monat
-    g = pd.Series(True, index=index)
-    return g.groupby([index.year, index.month]).head(1).index
-
+    g = pd.Series(index=index, data=True); return g.groupby([index.year, index.month]).head(1).index
 def weekly_dates(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
-    # erster Handelstag je ISO-Woche (pandas>=2 kompatibel)
-    iso_week = index.isocalendar().week.astype(int)
-    g = pd.Series(True, index=index)
-    return g.groupby([index.year, iso_week]).head(1).index
+    g = pd.Series(index=index, data=True); return g.groupby([index.year, index.isocalendar().week]).head(1).index
 
 def almgren_chriss_cost(trade_frac: pd.Series, eq: float, adv_notional: pd.Series, slices:int, ac_temp:float, ac_perm:float) -> float:
     if trade_frac.sum()<=0: return 0.0
-    notional = (trade_frac * eq).fillna(0.0)
+    notional = trade_frac * eq
     cap = adv_notional.replace(0, np.nan)
     ratio = (notional / cap).clip(lower=0.0)
-    temp = (ac_temp/10000.0) * float(np.nansum(np.sqrt(ratio) / max(1, slices)))
-    perm = (ac_perm/10000.0) * float(np.nansum(ratio))
+    temp = (ac_temp/10000.0) * np.nansum(np.sqrt(ratio) / max(1, slices))
+    perm = (ac_perm/10000.0) * np.nansum(ratio)
     return float(temp + perm)
 
 def rebalance_backtest(px: pd.DataFrame, rets: pd.DataFrame, vol_df: pd.DataFrame, dates: pd.DatetimeIndex,
@@ -938,6 +1029,8 @@ def rebalance_backtest(px: pd.DataFrame, rets: pd.DataFrame, vol_df: pd.DataFram
                        base_ccy:str, fx_ret: pd.Series,
                        dd_thr: float, dd_strength: float, hedge_overlay_on: bool,
                        ac_temp:float, ac_perm:float, ac_slices:int,
+                       sma_len:int=200, crash_switch:bool=True, crash_cut:float=0.35,
+                       risk_floor:float=0.15, def_floor:float=0.20,
                        min_hist: int=63) -> Tuple[pd.Series, pd.Series]:
     w_prev = None; eq_path, tc_series = [], []
     equity = 1.0
@@ -949,13 +1042,27 @@ def rebalance_backtest(px: pd.DataFrame, rets: pd.DataFrame, vol_df: pd.DataFram
             if px_hist.shape[0] < min_hist:
                 w = pd.Series(1.0/len(rets.columns), index=rets.columns, dtype=float)
             else:
-                w = run_single_optimizer(opt_choice, px_hist)
-                w = apply_caps(w, crypto_cap, equity_cap, single_cap)
+                # sleeves inside backtest date
+                risky_df, defens_df = split_universe(px_hist)
+                wr, _, _ = build_risky_weights(risky_df, to_returns(risky_df))
+                wd = build_defensive_weights(defens_df)
+                spy = px_hist.get("SPY", None)
+                if spy is None or spy.isna().all():
+                    risk_share = 0.5
+                else:
+                    tscore = trend_score(spy, 63, 252)
+                    above = 1.0 if spy.iloc[-1] > sma(spy, sma_len).iloc[-1] else 0.0
+                    reg = 0.5  # backtest light proxy
+                    risk_share = 0.15 + 0.35*above + 0.20*max(0.0, tscore) + 0.15*reg
+                    risk_share = float(np.clip(risk_share, risk_floor, 1.0-def_floor))
+                if crash_switch and spy is not None and spy.iloc[-1] < sma(spy, sma_len).iloc[-1]:
+                    risk_share = min(risk_share, float(crash_cut))
+                w_all = pd.Series(0.0, index=px_hist.columns, dtype=float)
+                w_all.loc[wr.index] = risk_share * wr.values
+                w_all.loc[wd.index] += (1.0 - risk_share) * wd.values
+                w_all = w_all / (w_all.sum() if w_all.sum()>0 else 1.0)
+                w = apply_caps(w_all, crypto_cap, equity_cap, single_cap)
                 if w.sum() > 0: w = w / w.sum()
-                mom = (px_hist/px_hist.shift(mom_lb_days) - 1.0).iloc[-1].reindex(w.index).fillna(0.0)
-                mom_score = (mom.rank(pct=True) - 0.5)
-                w_tilt = w * (1 + mom_strength * mom_score)
-                if w_tilt.sum() > 0: w = (w_tilt / w_tilt.sum()).fillna(0.0)
 
             if w_prev is not None:
                 delta = (w - w_prev).abs()
@@ -975,7 +1082,6 @@ def rebalance_backtest(px: pd.DataFrame, rets: pd.DataFrame, vol_df: pd.DataFram
                 imp = pd.Series(0.0, index=w.index, dtype=float)
                 if mask.any():
                     z = traded_notional[mask] / max_notional[mask].replace(0,np.nan)
-                    # FIX: impact_k-Param verwenden (nicht globale wf_impact_k)
                     imp.loc[mask] = (base_bps/10000.0) + (impact_k/10000.0) * np.sqrt(z.clip(lower=0.0).fillna(0.0))
                 else:
                     imp += (base_bps/10000.0)
@@ -984,12 +1090,13 @@ def rebalance_backtest(px: pd.DataFrame, rets: pd.DataFrame, vol_df: pd.DataFram
                 tc = tc_legacy + tc_ac
                 equity *= (1.0 - tc); tc_series.append((dt, tc))
                 w = w_prev + np.sign(w - w_prev) * delta
-                if w.sum() > 0: w = w / w.sum()
+                w = w / w.sum()
             w_prev = w.copy()
 
         if w_prev is None:
             w_prev = pd.Series(1.0/len(rets.columns), index=rets.columns, dtype=float)
 
+        # risk targeting + guard (use 63d vol proxy)
         hist = rets.loc[:dt].tail(63).reindex(columns=w_prev.index).dot(w_prev.values)
         curr_vol = hist.std() * np.sqrt(252) if len(hist) else 0.0
         sf = min(max_leverage, (target_vol / max(1e-8, curr_vol))) if curr_vol > 0 else 1.0
@@ -1002,7 +1109,7 @@ def rebalance_backtest(px: pd.DataFrame, rets: pd.DataFrame, vol_df: pd.DataFram
             guard = max(0.3, 1.0 - dd_strength * (over/max(1e-6, dd_thr)))
         r_core = float(rets.loc[dt].reindex(w_prev.index).fillna(0.0).dot(w_prev.values))
         r = r_core
-        # FX bereits ex-ante gehandhabt
+        if base_ccy != "USD": r += fx_ret.reindex([dt]).fillna(0.0).iloc[0] * 0.0
 
         if hedge_overlay_on and (dd < -dd_thr):
             r += 0.05 * float(rets.get("GLD", pd.Series(0.0, index=[dt])).reindex([dt]).fillna(0.0).iloc[0])
@@ -1014,7 +1121,7 @@ def rebalance_backtest(px: pd.DataFrame, rets: pd.DataFrame, vol_df: pd.DataFram
     return pd.Series(eq_path, index=rets.index, name="Portfolio"), tc_series
 
 with tab_backtest:
-    st.subheader("Walk-Forward Backtest · Portfolio vs Benchmark (TC/Liquidity-aware + AC)")
+    st.subheader("Walk-Forward Backtest · Portfolio vs Benchmark (TC/Liquidity-aware + AC) — Sleeves/Trend")
     bt_years = st.slider("Backtest years", 2, 15, value=min(5, years), key="bt_years")
     px_bt, vol_bt = load_ohlcv(tickers, years=bt_years, clamp_thr=outlier_thr)
     fx_bt = fx_series(base_ccy, px_bt.index)
@@ -1031,77 +1138,78 @@ with tab_backtest:
         min_trade=wf_min_trade,
         opt_choice=opt_choice, use_ewma=use_ewma_now, alpha=alpha, allow_short=allow_short,
         views_df=views_df, target_vol=target_vol_eff, max_leverage=max_leverage,
-        mom_strength=mom_strength, mom_lb_days=lb,
+        mom_strength=mom_strength, mom_lb_days={"6M":126, "9M":189, "12M":252}[mom_lb],
         base_ccy=base_ccy, fx_ret=to_returns(fx_bt.to_frame("FX")).squeeze()*-1.0,
         dd_thr=dd_guard_thr, dd_strength=dd_guard_strength, hedge_overlay_on=hedge_overlay_on,
-        ac_temp=ac_temp, ac_perm=ac_perm, ac_slices=ac_slices
+        ac_temp=ac_temp, ac_perm=ac_perm, ac_slices=ac_slices,
+        sma_len=sma_len, crash_switch=crash_switch, crash_cut=crash_cut,
+        risk_floor=risk_sleeve_floor, def_floor=def_sleeve_floor
     )
 
-    # -------- Benchmark robust laden & in Basiswährung bringen (IM TAB) --------
-    bench_ticker = st.selectbox("Benchmark", ["SPY", "QQQ", "URTH", "GLD"], index=0, key="bench")
+# -------- Benchmark robust laden & in Basiswährung bringen --------
+bench_ticker = st.selectbox("Benchmark", ["SPY", "QQQ", "URTH", "GLD"], index=0, key="bench")
 
-    def _force_series(obj: Union[pd.DataFrame, pd.Series], prefer_col: Optional[str] = None) -> pd.Series:
-        if isinstance(obj, pd.DataFrame):
-            if prefer_col is not None and prefer_col in obj.columns:
-                s = obj[prefer_col]
-            else:
-                s = obj.iloc[:, 0]
-            return pd.Series(s).dropna()
-        return pd.Series(obj).dropna()
+def _force_series(obj: pd.DataFrame | pd.Series, prefer_col: str | None = None) -> pd.Series:
+    if isinstance(obj, pd.DataFrame):
+        if prefer_col is not None and prefer_col in obj.columns:
+            s = obj[prefer_col]
+        else:
+            s = obj.iloc[:, 0]
+        return pd.Series(s).dropna()
+    return pd.Series(obj).dropna()
 
+try:
+    bench_raw = _download_with_retry(bench_ticker, period=f"{bt_years}y")
+    bench_df  = _normalize_price_frame(bench_raw)
+    bench_usd = _force_series(bench_df, prefer_col="Close" if "Close" in getattr(bench_df, "columns", []) else bench_ticker)
+except Exception:
     try:
-        bench_raw = _download_with_retry(bench_ticker, period=f"{bt_years}y")
-        bench_df  = _normalize_price_frame(bench_raw)
-        # bevorzugt "Adj Close", sonst erste Spalte
-        bench_usd = _force_series(bench_df, prefer_col="Adj Close" if "Adj Close" in getattr(bench_df, "columns", []) else None)
+        bench_usd = yf.download(bench_ticker, period=f"{bt_years}y",
+                                auto_adjust=True, progress=False)["Close"].dropna()
     except Exception:
-        try:
-            bench_usd = yf.download(bench_ticker, period=f"{bt_years}y",
-                                    auto_adjust=True, progress=False)["Close"].dropna()
-        except Exception:
-            bench_usd = pd.Series(dtype=float)
+        bench_usd = pd.Series(dtype=float)
 
-    fx_bench = fx_series(base_ccy, bench_usd.index)
-    bench_px  = bench_usd / fx_bench
+fx_bench = fx_series(base_ccy, bench_usd.index)
+bench_px  = bench_usd / fx_bench
 
-    common = eq.index.intersection(bench_px.index)
+common = eq.index.intersection(bench_px.index)
 
-    if len(common) >= 2:
-        port_eq  = (eq.loc[common] / float(eq.loc[common].iloc[0])).astype(float)
-        bench_eq = (bench_px.loc[common] / float(bench_px.loc[common].iloc[0])).astype(float)
+if len(common) >= 2:
+    port_eq  = (eq.loc[common] / float(eq.loc[common].iloc[0])).astype(float)
+    bench_eq = (bench_px.loc[common] / float(bench_px.loc[common].iloc[0])).astype(float)
 
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=common, y=port_eq.values,  name="Portfolio", mode="lines"))
-        fig.add_trace(go.Scatter(x=common, y=bench_eq.values, name=bench_ticker, mode="lines"))
-        fig.update_layout(title="Index (Start=1.0)", xaxis_title="Date", yaxis_title="Index",
-                          height=420, template="aladdin")
-        st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CFG)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=common, y=port_eq.values,  name="Portfolio", mode="lines"))
+    fig.add_trace(go.Scatter(x=common, y=bench_eq.values, name=bench_ticker, mode="lines"))
+    fig.update_layout(title="Index (Start=1.0)", xaxis_title="Date", yaxis_title="Index",
+                      height=420, template="aladdin")
+    st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CFG)
 
-        bt_ret = eq.pct_change().dropna()
-        n = len(bt_ret) if len(bt_ret) else 1
-        bt_cagr = (eq.iloc[-1] ** (252/n)) - 1 if len(eq) else 0.0
-        bt_vol  = bt_ret.std() * np.sqrt(252) if len(bt_ret) else 0.0
-        bt_sha  = (bt_ret.mean()/bt_ret.std()) * np.sqrt(252) if len(bt_ret) and bt_ret.std()!=0 else 0.0
-        bt_mdd  = float((eq/eq.cummax() - 1.0).min()) if len(eq) else 0.0
-        tc_ann  = float(tc_series.mean()*252) if len(tc_series) else 0.0
+    bt_ret = eq.pct_change().dropna()
+    n = len(bt_ret) if len(bt_ret) else 1
+    bt_cagr = (eq.iloc[-1] ** (252/n)) - 1 if len(eq) else 0.0
+    bt_vol  = bt_ret.std() * np.sqrt(252) if len(bt_ret) else 0.0
+    bt_sha  = (bt_ret.mean()/bt_ret.std()) * np.sqrt(252) if len(bt_ret) and bt_ret.std()!=0 else 0.0
+    bt_mdd  = float((eq/eq.cummax() - 1.0).min()) if len(eq) else 0.0
+    tc_ann  = float(tc_series.mean()*252) if len(tc_series) else 0.0
 
-        c1,c2,c3,c4,c5 = st.columns(5)
-        c1.metric("Backtest CAGR", f"{bt_cagr:.2%}")
-        c2.metric("Backtest Vol", f"{bt_vol:.2%}")
-        c3.metric("Backtest Sharpe", f"{bt_sha:.2f}")
-        c4.metric("Backtest MaxDD", f"{bt_mdd:.2%}")
-        c5.metric("Avg TC (ann.)", f"{tc_ann:.2%}")
+    c1,c2,c3,c4,c5 = st.columns(5)
+    c1.metric("Backtest CAGR", f"{bt_cagr:.2%}")
+    c2.metric("Backtest Vol", f"{bt_vol:.2%}")
+    c3.metric("Backtest Sharpe", f"{bt_sha:.2f}")
+    c4.metric("Backtest MaxDD", f"{bt_mdd:.2%}")
+    c5.metric("Avg TC (ann.)", f"{tc_ann:.2%}")
 
-        last_port  = float(port_eq.iloc[-1])
-        last_bench = float(bench_eq.iloc[-1])
-        outp = last_port / last_bench - 1.0
-        st.markdown(f"**Outperformance vs {bench_ticker}: {outp:.2%}**")
-    else:
-        st.info("Benchmark-Zeitreihe zu kurz oder keine Überschneidung mit Portfolio-History.")
+    last_port  = float(port_eq.iloc[-1])
+    last_bench = float(bench_eq.iloc[-1])
+    outp = last_port / last_bench - 1.0
+    st.markdown(f"**Outperformance vs {bench_ticker}: {outp:.2%}**")
+else:
+    st.info("Benchmark-Zeitreihe zu kurz oder keine Überschneidung mit Portfolio-History.")
 
 # ---------- CV & Deflated Sharpe ----------
 def time_series_folds(index: pd.DatetimeIndex, k: int=5, embargo: int=10):
-    n = len(index); fold_size = max(1, n // k)
+    n = len(index); fold_size = n // k
     for i in range(k):
         start = i*fold_size; end = (i+1)*fold_size if i<k-1 else n
         test_idx = index[start:end]
@@ -1194,7 +1302,7 @@ with tab_factors:
         X_ = np.column_stack([np.ones(len(X)), X.values])
         coef, *_ = np.linalg.lstsq(X_, y.values, rcond=None)
         pred = X_ @ coef
-        ss_res = float(np.sum((y.values - pred)**2)); ss_tot = float(np.sum((y.values - y.values.mean())**2))
+        ss_res = np.sum((y.values - pred)**2); ss_tot = np.sum((y.values - y.values.mean())**2)
         r2 = 0.0 if ss_tot==0 else 1 - ss_res/ss_tot
         for i, kf in enumerate(X.columns, start=1): beta[kf] = float(coef[i])
 
@@ -1343,21 +1451,12 @@ with tab_ai:
     notes.append(f"Leverage live: {scale_live:.2f}×; Drawdown guard thr {dd_guard_thr:.0%}, strength {dd_guard_strength:.0%}.")
     notes.append(f"Risk snapshot → VaR1d: {VaR_eff:.2%}, ES1d: {ES_eff:.2%}, MaxDD: {MDD_eff:.2%}.")
     if hedge_overlay_on: notes.append(f"Hedge overlay active: GLD {hedge_add:.0%}, FX hedge {fx_hedge_ratio:.0%} (base {base_ccy}).")
+    spy = px_base.get("SPY", None)
+    if spy is not None:
+        notes.append(f"Trend (SPY vs {sma_len}d SMA): {'↑' if spy.iloc[-1]>sma(spy,sma_len).iloc[-1] else '↓'}")
     if crypto_exp > crypto_cap + 1e-6: notes.append("🔧 Reduce crypto weights to respect cap.")
-    if MDD_eff < -0.25: notes.append("🛡 High DD: lower target vol, increase hedge, or add bonds/gold.")
-    if sr_eff < 0.6 and ann_vol_eff > target_vol_eff * 0.9: notes.append("⚖️ Low Sharpe with high vol → try ERC/Min-CVaR, tweak momentum.")
-    try:
-        from sklearn.cluster import KMeans
-        feat = pd.DataFrame({
-            "vol": rets_base.rolling(20).std().iloc[-90:].mean(),
-            "mom": (px_base.iloc[-1]/px_base.iloc[-63]-1.0).reindex(rets_base.columns)
-        }).fillna(0.0)
-        km = KMeans(n_clusters=2, n_init=10, random_state=42).fit(feat.values)
-        cl = km.labels_; high_idx = np.argmax([feat.values[cl==i,0].mean() for i in [0,1]])
-        high_cluster_members = feat.index[cl==high_idx].tolist()
-        notes.append("🤖 ML Regime (cluster-high vol): " + ", ".join(high_cluster_members[:6]) + ("…" if len(high_cluster_members)>6 else ""))
-    except Exception:
-        notes.append("🤖 ML Regime: (optional) install scikit-learn for clustering insights.")
+    if MDD_eff < -0.25: notes.append("🛡 High DD: lower target vol, increase hedge, or add bonds/cash.")
+    if sr_eff < 0.6 and ann_vol_eff > target_vol_eff * 0.9: notes.append("⚖️ Low Sharpe → ERC/Min-CVaR, tweak momentum/Trend-Gate.")
     st.write("\n\n".join(f"- {m}" for m in notes))
 
 # ---------- Report ----------
@@ -1370,9 +1469,9 @@ with tab_report:
     if "URTH" in tickers: proxy_note.append("MSCI World → URTH")
     if "UFO"  in tickers: proxy_note.append("STARLINK/SpaceX → UFO (space economy ETF)")
     html = f"""
-    <html><head><meta charset="utf-8"><title>ALADDIN 3.2 Report</title></head>
+    <html><head><meta charset="utf-8"><title>ALADDIN 3.3 Report</title></head>
     <body style="font-family:Inter,system-ui,sans-serif;background:#0c0f14;color:#e5e7eb;">
-      <h2>ALADDIN 3.2 — Summary ({datetime.now().strftime('%Y-%m-%d %H:%M')})</h2>
+      <h2>ALADDIN 3.3 — Summary ({datetime.now().strftime('%Y-%m-%d %H:%M')})</h2>
       <p><b>Universe:</b> {', '.join(friendly_selection)}</p>
       <p><b>Proxies:</b> {'; '.join(proxy_note) if proxy_note else '—'}</p>
       <p><b>Model:</b> {opt_label} | <b>Regime:</b> {regime} | <b>Caps:</b> SA {single_cap:.0%} / Eq {equity_cap:.0%} / Crypto {crypto_cap:.0%}
@@ -1390,7 +1489,7 @@ with tab_report:
         <li>CVaR({int(alpha*100)}%) ~ {ES_eff:.2%}</li>
         <li>Max Drawdown: {MDD_eff:.2%}</li>
       </ul>
-      <p style="color:#94a3b8;">Hinweis: BL/HRP/Min-CVaR/ERC benötigen optionale Libraries; bei Fehlen wird ein robustes Fallback genutzt.</p>
+      <p style="color:#94a3b8;">Hinweis: Performance in Zukunft ist unsicher. 3.3 de-risked automatisch via Trend/Regime & Bond/Cash-Sleeve.</p>
     </body></html>
     """
     st.download_button("Download HTML Report", data=html.encode("utf-8"),
