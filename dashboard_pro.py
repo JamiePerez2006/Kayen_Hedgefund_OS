@@ -199,19 +199,58 @@ def ewma_cov(returns: pd.DataFrame, lam: float = 0.94) -> pd.DataFrame:
     return pd.DataFrame(S, index=returns.columns, columns=returns.columns)
 
 def corr_regime(returns: pd.DataFrame, lookback:int=63) -> float:
-    if len(returns)<lookback: return 0.0
-    c = returns.tail(lookback).corr().values
+    """
+    Mittlere paarweise Korrelation (Upper Triangle) – robust bei kurzer History.
+    Gibt 0.0 zurück, wenn zu wenige Daten vorhanden sind.
+    """
+    if returns is None or returns.empty:
+        return 0.0
+    lb = min(lookback, len(returns))
+    if lb < 3:
+        return 0.0
+    c = returns.tail(lb).corr().values
+    if c.size == 0:
+        return 0.0
     iu = np.triu_indices_from(c, 1)
-    return float(np.nanmean(c[iu]))
+    return float(np.nanmean(c[iu])) if len(iu[0]) else 0.0
 
-def regime_tag(returns: pd.DataFrame) -> str:
-    if returns.empty: return "unknown"
-    vol = returns.rolling(21).std().dropna().iloc[-1].mean()
-    mom = returns.mean().rolling(63).mean().dropna().iloc[-1].mean()
-    acorr = corr_regime(returns, 63)
-    # simple heuristic
-    if vol > 0.025 and acorr > 0.4: return "high-vol"
-    if mom < 0: return "bear"
+
+def regime_tag(returns: pd.DataFrame,
+               lb_vol:int=21, lb_mom:int=63,
+               thr_vol:float=0.025, thr_corr:float=0.40) -> str:
+    """
+    Regime-Engine (robust):
+    - Volatilität: rolling Std. über Zeit, am Ende querschnittlich gemittelt
+    - Momentum: rolling Mittel der *querschnittlichen Tagesrendite*
+    - Korrelation: mittlere paarweise Korrelation
+    Mit sauberen Fallbacks, damit kein .iloc[-1]-Crash auftreten kann.
+    """
+    if returns is None or returns.empty or len(returns) < 3:
+        return "unknown"
+
+    # Volatilität (zeitlich je Asset) → Querschnittsmittel am letzten verfügbaren Tag
+    vol_df = returns.rolling(lb_vol).std()
+    if vol_df.dropna(how="all").shape[0] > 0 and not vol_df.dropna(how="all").tail(1).empty:
+        vol = float(vol_df.dropna(how="all").tail(1).mean(axis=1).iloc[0])
+    else:
+        vol = float(returns.std(ddof=0).mean())  # Fallback
+
+    # Cross-sectional daily mean → Momentum über Zeit
+    cs_mean = returns.mean(axis=1)  # Serie über Datum
+    mom_roll = cs_mean.rolling(lb_mom).mean()
+    if mom_roll.dropna().shape[0] > 0 and not mom_roll.dropna().tail(1).empty:
+        mom = float(mom_roll.dropna().tail(1).iloc[0])
+    else:
+        mom = float(cs_mean.mean())  # Fallback
+
+    # Korrelation
+    acorr = corr_regime(returns, lookback=lb_mom)
+
+    # Heuristik
+    if vol > thr_vol and acorr > thr_corr:
+        return "high-vol"
+    if mom < 0:
+        return "bear"
     return "normal"
 
 def sparkline(series: pd.Series, height=60):
