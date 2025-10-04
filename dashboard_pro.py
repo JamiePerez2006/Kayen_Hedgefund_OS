@@ -105,6 +105,8 @@ FRIENDLY_ORDER = list(ASSET_MAP.keys())
 CRYPTO_KEYS = ("BTC-USD", "ETH-USD", "SOL-USD")
 EQUITY_TICKERS = {"AAPL", "TSLA", "NVDA", "QQQ", "SPY", "URTH", "UFO"}
 
+CRYPTO_TICKERS = CRYPTO_KEYS  # alias to avoid NameError
+
 # Helpers for label mapping
 TICKER_TO_FRIENDLY = {}
 for k, v in ASSET_MAP.items():
@@ -357,26 +359,37 @@ def optimizer_black_litterman(px_hist: pd.DataFrame, lb: float, ub: float,
 # ---------- Caps & Constraints ----------
 def apply_caps(weights: pd.Series, crypto_cap: float, equity_cap: float, single_cap: float) -> pd.Series:
     w = weights.copy().fillna(0.0).astype(float)
+
+    # 1) Single-Asset Cap (harte Obergrenze je Asset)
     if single_cap < 1.0:
         w = w.clip(upper=single_cap)
-        if w.sum()>0: w /= w.sum()
-    crypto_cols = [c for c in w.index if c in CRYPTO_TICKERS]
+        if w.sum() > 0:
+            w /= w.sum()
+
+    # 2) Crypto-Gruppencap
+    crypto_cols = [c for c in w.index if c in CRYPTO_KEYS]
     if crypto_cols:
-        cs = float(pd.Series(w.loc[crypto_cols]).clip(lower=0).sum())
+        cs = float(w.loc[crypto_cols].clip(lower=0).sum())
         if crypto_cap <= 0:
             w.loc[crypto_cols] = 0.0
-            if w.sum()>0: w /= w.sum()
+            if w.sum() > 0:
+                w /= w.sum()
         elif cs > crypto_cap and cs > 0:
             scale = crypto_cap / cs
-            w.loc[crypto_cols] = w.loc[crypto_cols]*scale
-            if w.sum()>0: w /= w.sum()
+            w.loc[crypto_cols] = w.loc[crypto_cols] * scale
+            if w.sum() > 0:
+                w /= w.sum()
+
+    # 3) Equity-Gruppencap
     eq_cols = [c for c in w.index if c in EQUITY_TICKERS]
     if eq_cols and equity_cap < 1.0:
-        es = float(pd.Series(w.loc[eq_cols]).clip(lower=0).sum())
+        es = float(w.loc[eq_cols].clip(lower=0).sum())
         if es > equity_cap and es > 0:
             scale = equity_cap / es
-            w.loc[eq_cols] = w.loc[eq_cols]*scale
-            if w.sum()>0: w /= w.sum()
+            w.loc[eq_cols] = w.loc[eq_cols] * scale
+            if w.sum() > 0:
+                w /= w.sum()
+
     return w
 
 # ---------- UI Header ----------
