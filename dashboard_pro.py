@@ -765,47 +765,48 @@ with tab_backtest:
         mom_strength=mom_strength, mom_lb_days=lb_days
     )
 
-    # Benchmarks shown by friendly name (mapped internally)
-    BENCH_FRIENDLY = ["S&P 500","NASDAQ","MSCI World ETF","Gold"]
-    BENCH_MAP = {f: ASSET_MAP[f] for f in BENCH_FRIENDLY}
-    bench_friendly = st.selectbox("Benchmark", BENCH_FRIENDLY, index=0, key="bench_friendly")
-    bench_ticker = BENCH_MAP[bench_friendly]
+    # --- Benchmark (Friendly -> Ticker) ---
+bench_choices_friendly = ["Gold", "NASDAQ", "S&P 500", "MSCI World ETF",
+                          "BTCUSD", "ETHUSD", "SOLUSD", "Apple", "Tesla", "NVIDIA"]
+bench_label = st.selectbox("Benchmark", bench_choices_friendly, index=0, key="bench")
 
-    bench_px_raw = _download_with_retry(bench_ticker, period=f"{bt_years}y")
-    try:
-        bench_px = _normalize_price_frame(bench_px_raw)["Close"].dropna()
-    except Exception:
-        bench_px = yf.download(bench_ticker, period=f"{bt_years}y", auto_adjust=True, progress=False)["Close"].dropna()
+# Map Friendly -> Ticker via ASSET_MAP (oben definiert)
+bench_ticker = ASSET_MAP.get(bench_label, bench_label)
 
+# Robust download + Normalisierung
+try:
+    # gleiche Historie wie Backtest
+    bench_raw = _download_with_retry(bench_ticker, period=f"{bt_years}y")
+    bench_px = _normalize_price_frame(bench_raw)
+    # Serie extrahieren
+    if isinstance(bench_px, pd.DataFrame):
+        if "Close" in bench_px.columns: 
+            bench_px = bench_px["Close"]
+        elif "Adj Close" in bench_px.columns:
+            bench_px = bench_px["Adj Close"]
+        else:
+            bench_px = bench_px.iloc[:, 0]
+    bench_px = bench_px.dropna()
+except Exception:
+    bench_px = pd.Series(dtype=float)
+
+if bench_px.empty:
+    st.warning(f"Keine Benchmark-Daten für '{bench_label}' (Ticker '{bench_ticker}'). Prüfe Mapping in ASSET_MAP.")
+    bench_eq = pd.Series(index=eq.index, dtype=float)
+else:
+    # Indizes auf Schnittmenge bringen und auf 1.0 normieren
     common = eq.index.intersection(bench_px.index)
-    bench_eq = bench_px.loc[common] / bench_px.loc[common].iloc[0]
-    port_eq  = eq.loc[common] / eq.loc[common].iloc[0]
+    bench_px = bench_px.loc[common]
+    bench_eq = bench_px / bench_px.iloc[0]
 
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=common, y=port_eq.values,  name="Portfolio", mode="lines"))
-    fig.add_trace(go.Scatter(x=common, y=bench_eq.values, name=bench_friendly, mode="lines"))
-    fig.update_layout(title="Index (Start=1.0)", xaxis_title="Date", yaxis_title="Index", height=420, template="aladdin")
-    st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CFG)
+port_eq  = eq.loc[bench_eq.index] / eq.loc[bench_eq.index].iloc[0]
 
-    bt_ret = eq.pct_change().dropna(); n = len(bt_ret) if len(bt_ret) else 1
-    bt_cagr = (eq.iloc[-1] ** (252/n)) - 1 if len(eq) else 0.0
-    bt_vol  = bt_ret.std()*np.sqrt(252) if len(bt_ret) else 0.0
-    bt_sha  = (bt_ret.mean()/bt_ret.std())*np.sqrt(252) if len(bt_ret) and bt_ret.std()!=0 else 0.0
-    bt_mdd  = float((eq/eq.cummax() - 1.0).min()) if len(eq) else 0.0
-    tc_ann  = float(tc_series.mean()*252) if len(tc_series) else 0.0
-
-    c1,c2,c3,c4,c5 = st.columns(5)
-    c1.metric("Backtest CAGR", f"{bt_cagr:.2%}")
-    c2.metric("Backtest Vol", f"{bt_vol:.2%}")
-    c3.metric("Backtest Sharpe", f"{bt_sha:.2f}")
-    c4.metric("Backtest MaxDD", f"{bt_mdd:.2%}")
-    c5.metric("Avg TC (ann.)", f"{tc_ann:.2%}")
-
-    if len(port_eq) and len(bench_eq):
-        outp = float(port_eq.iloc[-1] / bench_eq.iloc[-1] - 1.0)
-        st.markdown(f"**Outperformance vs {bench_friendly}: {outp:.2%}**")
-    else:
-        st.markdown("Outperformance: n/a")
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=port_eq.index,  y=port_eq.values,  name="Portfolio", mode="lines"))
+if not bench_eq.empty:
+    fig.add_trace(go.Scatter(x=bench_eq.index, y=bench_eq.values, name=bench_label, mode="lines"))
+fig.update_layout(title="Index (Start=1.0)", xaxis_title="Date", yaxis_title="Index", height=420, template="aladdin")
+st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CFG)
 
 # ---------- Purged K-Fold CV + Deflated Sharpe ----------
 def time_series_folds(index: pd.DatetimeIndex, k: int=5, embargo: int=10):
