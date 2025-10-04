@@ -85,10 +85,8 @@ hr { border:none; height:1px; background:linear-gradient(90deg,transparent,rgba(
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 st.markdown('<div class="background-grid"></div>', unsafe_allow_html=True)
 
-# ---------- Assets: friendly -> ticker ----------
-# Friendly names are exactly your list; UI shows only these.
-ASSET_MAP: Dict[str, str] = {
-    "BTCSD": "BTC-USD",           # alias (common typo)
+# ---------- Assets (friendly -> ticker map) ----------
+ASSET_MAP = {
     "BTCUSD": "BTC-USD",
     "ETHUSD": "ETH-USD",
     "SOLUSD": "SOL-USD",
@@ -96,17 +94,16 @@ ASSET_MAP: Dict[str, str] = {
     "Tesla": "TSLA",
     "Gold": "GLD",
     "NVIDIA": "NVDA",
-    "NASDAQ": "QQQ",              # proxy Nasdaq-100
-    "S&P 500": "SPY",             # proxy S&P 500
+    "NASDAQ": "QQQ",         # Nasdaq-100 proxy
+    "S&P 500": "SPY",        # S&P 500 proxy
     "MSCI World ETF": "URTH",
-    "STARLINK (SPACE X)": "UFO",  # space economy ETF as proxy
+    "STARLINK (SPACE X)": "UFO"
 }
-FRIENDLY_ORDER = ["BTCSD","BTCUSD","ETHUSD","SOLUSD","Apple","Tesla","Gold",
-                  "NVIDIA","NASDAQ","S&P 500","MSCI World ETF","STARLINK (SPACE X)"]
+FRIENDLY_ORDER = list(ASSET_MAP.keys())
 
-# Group tags for caps
-CRYPTO_TICKERS = {"BTC-USD","ETH-USD","SOL-USD"}
-EQUITY_TICKERS = {"AAPL","TSLA","NVDA","QQQ","SPY","URTH","UFO"}  # can extend
+# Simple group tags for caps
+CRYPTO_KEYS = ("BTC-USD", "ETH-USD", "SOL-USD")
+EQUITY_TICKERS = {"AAPL", "TSLA", "NVDA", "QQQ", "SPY", "URTH", "UFO"}
 
 # Helpers for label mapping
 TICKER_TO_FRIENDLY = {}
