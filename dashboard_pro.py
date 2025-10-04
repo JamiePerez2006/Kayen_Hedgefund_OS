@@ -400,31 +400,26 @@ DEFAULT_FRIENDLY = ["BTCUSD","ETHUSD","SOLUSD","Apple","Tesla","Gold",
                     "NVIDIA","NASDAQ","S&P 500","MSCI World ETF","STARLINK (SPACE X)"]
 
 # ---- Universe (choose from your set) ----
-# Saubere Default-Liste (nur gültige Friendly-Namen, KEINE Tippfehler wie "BTCSD")
 DEFAULT_FRIENDLY = [
-    "BTCUSD", "ETHUSD", "SOLUSD",
-    "Apple", "Tesla", "Gold", "NVIDIA",
-    "NASDAQ", "S&P 500", "MSCI World ETF", "STARLINK (SPACE X)"
+    "BTCUSD","ETHUSD","SOLUSD",
+    "Apple","Tesla","Gold","NVIDIA",
+    "NASDAQ","S&P 500","MSCI World ETF","STARLINK (SPACE X)"
 ]
 
 friendly_selection = st.sidebar.multiselect(
     "Universe (choose from your set)",
-    options=FRIENDLY_ORDER,              # nur erlaubte Friendly-Namen
+    options=FRIENDLY_ORDER,
     default=DEFAULT_FRIENDLY if preset_toggle else DEFAULT_FRIENDLY
 )
 
-# --- Harter Filter gegen Duplikate & Tippfehler ---
-# 1) Whitespace entfernen
+# Harte Absicherung: Whitespace entfernen, Duplikate raus, Unbekannte ignorieren
 friendly_selection = [s.strip() for s in friendly_selection]
-# 2) Duplikate entfernen, Reihenfolge behalten
-friendly_selection = list(dict.fromkeys(friendly_selection))
-# 3) Unbekannte Friendly-Namen rausfiltern (z.B. "BTCSD")
+friendly_selection = list(dict.fromkeys(friendly_selection))  # dedupe, order preserving
 unknown = [s for s in friendly_selection if s not in ASSET_MAP]
 if unknown:
     st.sidebar.warning(f"Ignored unknown items in universe: {unknown}")
     friendly_selection = [s for s in friendly_selection if s in ASSET_MAP]
 
-# 4) Mapping auf echte Ticker
 tickers = [ASSET_MAP[s] for s in friendly_selection]
 
 years = st.sidebar.slider("Years of history", 2, 15, value=5)
@@ -623,7 +618,11 @@ with tab_overview:
     with L:
         st.subheader("Portfolio Overview (target)")
         ytd = {t: rets[t].loc[rets.index.year==rets.index[-1].year].sum() if t in rets.columns else 0.0 for t in px.columns}
-        df_over = pd.DataFrame({"Weight": w_opt.round(4), "YTD Return": pd.Series(ytd).round(4)})
+        
+        # --- Fix: alles in float casten, damit keine object-dtypes entstehen ---
+        w_opt = w_opt.astype(float)
+        ytd_series = pd.to_numeric(pd.Series(ytd), errors="coerce").fillna(0.0)
+        df_over = pd.DataFrame({"Weight": w_opt.round(4), "YTD Return": ytd_series.round(4)})
         df_over.index = labelize(df_over.index.tolist())
         st.dataframe(df_over, use_container_width=True)
         st.download_button("Export Weights (JSON)",
