@@ -402,18 +402,12 @@ with colB:
 DEFAULT_FRIENDLY = ["BTCUSD","ETHUSD","SOLUSD","Apple","Tesla","Gold",
                     "NVIDIA","NASDAQ","S&P 500","MSCI World ETF","STARLINK (SPACE X)"]
 
-# Clean selection: trim, dedupe, validate
-friendly_selection = [s.strip() for s in friendly_selection]
-friendly_selection = list(dict.fromkeys(friendly_selection))  # Reihenfolge behalten, Duplikate droppen
-
-# Unbekannte Friendly-Namen (z.B. "BTCSD") melden und entfernen
-unknown = [s for s in friendly_selection if s not in ASSET_MAP]
-if unknown:
-    st.sidebar.warning(f"Unknown in universe (ignored): {unknown}")
-    friendly_selection = [s for s in friendly_selection if s in ASSET_MAP]
-
-# Jetzt sauber mappen
-tickers = [ASSET_MAP[s] for s in friendly_selection]
+friendly_selection = st.sidebar.multiselect(
+    "Universe (choose from your set)",
+    options=FRIENDLY_ORDER,
+    default=DEFAULT_FRIENDLY if preset_toggle else DEFAULT_FRIENDLY
+)
+tickers = [ASSET_MAP[x] for x in friendly_selection]
 
 years = st.sidebar.slider("Years of history", 2, 15, value=5)
 outlier_thr = st.sidebar.slider("Outlier clamp (1d move)", 0.20, 0.80, 0.40, 0.05)
