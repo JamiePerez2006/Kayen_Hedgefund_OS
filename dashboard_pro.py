@@ -402,12 +402,33 @@ with colB:
 DEFAULT_FRIENDLY = ["BTCUSD","ETHUSD","SOLUSD","Apple","Tesla","Gold",
                     "NVIDIA","NASDAQ","S&P 500","MSCI World ETF","STARLINK (SPACE X)"]
 
+# ---- Universe (choose from your set) ----
+# Saubere Default-Liste (nur gültige Friendly-Namen, KEINE Tippfehler wie "BTCSD")
+DEFAULT_FRIENDLY = [
+    "BTCUSD", "ETHUSD", "SOLUSD",
+    "Apple", "Tesla", "Gold", "NVIDIA",
+    "NASDAQ", "S&P 500", "MSCI World ETF", "STARLINK (SPACE X)"
+]
+
 friendly_selection = st.sidebar.multiselect(
     "Universe (choose from your set)",
-    options=FRIENDLY_ORDER,
+    options=FRIENDLY_ORDER,              # nur erlaubte Friendly-Namen
     default=DEFAULT_FRIENDLY if preset_toggle else DEFAULT_FRIENDLY
 )
-tickers = [ASSET_MAP[x] for x in friendly_selection]
+
+# --- Harter Filter gegen Duplikate & Tippfehler ---
+# 1) Whitespace entfernen
+friendly_selection = [s.strip() for s in friendly_selection]
+# 2) Duplikate entfernen, Reihenfolge behalten
+friendly_selection = list(dict.fromkeys(friendly_selection))
+# 3) Unbekannte Friendly-Namen rausfiltern (z.B. "BTCSD")
+unknown = [s for s in friendly_selection if s not in ASSET_MAP]
+if unknown:
+    st.sidebar.warning(f"Ignored unknown items in universe: {unknown}")
+    friendly_selection = [s for s in friendly_selection if s in ASSET_MAP]
+
+# 4) Mapping auf echte Ticker
+tickers = [ASSET_MAP[s] for s in friendly_selection]
 
 years = st.sidebar.slider("Years of history", 2, 15, value=5)
 outlier_thr = st.sidebar.slider("Outlier clamp (1d move)", 0.20, 0.80, 0.40, 0.05)
