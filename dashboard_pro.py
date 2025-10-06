@@ -8,8 +8,6 @@
 # UI: Only friendly market names (no raw tickers like SPY/QQQ shown)
 # ==========================================================
 
-füge einfach alles ein was es braucht um es zum laufen zu bringen damit meintelegram auch läuft ich füge dann nachher nurnoch die id und den bot token ein lets go danke dir kayen 
-
 import io, json, math, time, warnings, random
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -22,31 +20,6 @@ import streamlit as st
 import plotly.graph_objs as go
 import plotly.io as pio
 import matplotlib.pyplot as plt
-
-# ---- Telegram Alerts (simple) ----
-import requests  # <— zusätzlicher Import nur für Telegram
-
-def send_telegram(msg: str) -> bool:
-    """
-    Sendet einen Text an deinen Telegram-Bot-Chat.
-    Benötigt TELEGRAM_BOT_TOKEN und TELEGRAM_CHAT_ID in den Streamlit-Secrets.
-    """
-    try:
-        token = st.secrets["TELEGRAM_BOT_TOKEN"]
-        chat_id = st.secrets["TELEGRAM_CHAT_ID"]
-    except Exception:
-        # Zeig eine klare Fehlermeldung in der App, wenn Secrets fehlen
-        st.error("Telegram Secrets fehlen. In Streamlit Cloud → Settings → Secrets setzen.")
-        return False
-
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": msg}
-    try:
-        r = requests.post(url, data=payload, timeout=10)
-        return r.status_code == 200
-    except Exception as e:
-        st.error(f"Telegram Fehler: {e}")
-        return False
 
 warnings.filterwarnings("ignore")
 
@@ -435,17 +408,6 @@ with colA:
         st.cache_data.clear(); st.success("Cache cleared.")
 with colB:
     preset_toggle = st.checkbox("Use KAYEN preset", value=True)
-
-# ---- Alerts (Telegram) ----
-st.sidebar.markdown("---")
-st.sidebar.subheader("Alerts")
-
-if st.sidebar.button("🔔 Telegram Test-Alert senden", use_container_width=True):
-    ok = send_telegram("ALADDIN: Test-Alert ✅")
-    if ok:
-        st.sidebar.success("Test-Alert gesendet.")
-    else:
-        st.sidebar.error("Konnte Test-Alert nicht senden (Secrets prüfen).")
 
 DEFAULT_FRIENDLY = ["BTCUSD","ETHUSD","SOLUSD","Apple","Tesla","Gold",
                     "NVIDIA","NASDAQ","S&P 500","MSCI World ETF","STARLINK (SPACE X)"]
