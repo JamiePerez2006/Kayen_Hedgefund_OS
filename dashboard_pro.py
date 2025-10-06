@@ -90,8 +90,9 @@ st.markdown('<div class="background-grid"></div>', unsafe_allow_html=True)
 def send_telegram(msg: str) -> bool:
     """Sendet msg an deinen Telegram-Chat. Erwartet TELEGRAM_BOT_TOKEN & TELEGRAM_CHAT_ID in st.secrets."""
     try:
-        token = st.secrets "8245670300: AAHØUB_sRM5IU5E1Zftm5F3fhY8_EIZ29Yo"
-        chat_id = st.secrets "5266601384"
+        token = st.secrets["TELEGRAM_BOT_TOKEN"]
+        chat_id = st.secrets["TELEGRAM_CHAT_ID"]
+
     except Exception:
         st.error("Telegram Secrets fehlen. In Streamlit Cloud → Settings → Secrets setzen.")
         return False
