@@ -8,6 +8,8 @@
 # UI: Only friendly market names (no raw tickers like SPY/QQQ shown)
 # ==========================================================
 
+füge einfach alles ein was es braucht um es zum laufen zu bringen damit meintelegram auch läuft ich füge dann nachher nurnoch die id und den bot token ein lets go danke dir kayen 
+
 import io, json, math, time, warnings, random
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -20,7 +22,31 @@ import streamlit as st
 import plotly.graph_objs as go
 import plotly.io as pio
 import matplotlib.pyplot as plt
-import requests  # Telegram
+
+# ---- Telegram Alerts (simple) ----
+import requests  # <— zusätzlicher Import nur für Telegram
+
+def send_telegram(msg: str) -> bool:
+    """
+    Sendet einen Text an deinen Telegram-Bot-Chat.
+    Benötigt TELEGRAM_BOT_TOKEN und TELEGRAM_CHAT_ID in den Streamlit-Secrets.
+    """
+    try:
+        token = st.secrets["TELEGRAM_BOT_TOKEN"]
+        chat_id = st.secrets["TELEGRAM_CHAT_ID"]
+    except Exception:
+        # Zeig eine klare Fehlermeldung in der App, wenn Secrets fehlen
+        st.error("Telegram Secrets fehlen. In Streamlit Cloud → Settings → Secrets setzen.")
+        return False
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": msg}
+    try:
+        r = requests.post(url, data=payload, timeout=10)
+        return r.status_code == 200
+    except Exception as e:
+        st.error(f"Telegram Fehler: {e}")
+        return False
 
 warnings.filterwarnings("ignore")
 
@@ -86,26 +112,6 @@ hr { border:none; height:1px; background:linear-gradient(90deg,transparent,rgba(
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 st.markdown('<div class="background-grid"></div>', unsafe_allow_html=True)
 
-# ---- Telegram Alerts (simple) ----
-def send_telegram(msg: str) -> bool:
-    """Sendet msg an deinen Telegram-Chat. Erwartet TELEGRAM_BOT_TOKEN & TELEGRAM_CHAT_ID in st.secrets."""
-    try:
-        token = st.secrets["TELEGRAM_BOT_TOKEN"]
-        chat_id = st.secrets["TELEGRAM_CHAT_ID"]
-
-    except Exception:
-        st.error("Telegram Secrets fehlen. In Streamlit Cloud → Settings → Secrets setzen.")
-        return False
-
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": msg}
-    try:
-        r = requests.post(url, data=payload, timeout=10)
-        return r.status_code == 200
-    except Exception as e:
-        st.error(f"Telegram Fehler: {e}")
-        return False
-
 # ---------- Assets (friendly -> ticker map) ----------
 ASSET_MAP = {
     "BTCUSD": "BTC-USD",
@@ -125,11 +131,13 @@ FRIENDLY_ORDER = list(ASSET_MAP.keys())
 # Simple group tags for caps
 CRYPTO_KEYS = ("BTC-USD", "ETH-USD", "SOL-USD")
 EQUITY_TICKERS = {"AAPL", "TSLA", "NVDA", "QQQ", "SPY", "URTH", "UFO"}
-CRYPTO_TICKERS = CRYPTO_KEYS
+
+CRYPTO_TICKERS = CRYPTO_KEYS  # alias to avoid NameError
 
 # Helpers for label mapping
 TICKER_TO_FRIENDLY = {}
 for k, v in ASSET_MAP.items():
+    # prefer first friendly encountered for a ticker
     TICKER_TO_FRIENDLY.setdefault(v, k)
 
 def labelize(idx: List[str]) -> List[str]:
@@ -378,10 +386,14 @@ def optimizer_black_litterman(px_hist: pd.DataFrame, lb: float, ub: float,
 # ---------- Caps & Constraints ----------
 def apply_caps(weights: pd.Series, crypto_cap: float, equity_cap: float, single_cap: float) -> pd.Series:
     w = weights.copy().fillna(0.0).astype(float)
+
+    # 1) Single-Asset Cap (harte Obergrenze je Asset)
     if single_cap < 1.0:
         w = w.clip(upper=single_cap)
         if w.sum() > 0:
             w /= w.sum()
+
+    # 2) Crypto-Gruppencap
     crypto_cols = [c for c in w.index if c in CRYPTO_KEYS]
     if crypto_cols:
         cs = float(w.loc[crypto_cols].clip(lower=0).sum())
@@ -394,6 +406,8 @@ def apply_caps(weights: pd.Series, crypto_cap: float, equity_cap: float, single_
             w.loc[crypto_cols] = w.loc[crypto_cols] * scale
             if w.sum() > 0:
                 w /= w.sum()
+
+    # 3) Equity-Gruppencap
     eq_cols = [c for c in w.index if c in EQUITY_TICKERS]
     if eq_cols and equity_cap < 1.0:
         es = float(w.loc[eq_cols].clip(lower=0).sum())
@@ -402,6 +416,7 @@ def apply_caps(weights: pd.Series, crypto_cap: float, equity_cap: float, single_
             w.loc[eq_cols] = w.loc[eq_cols] * scale
             if w.sum() > 0:
                 w /= w.sum()
+
     return w
 
 # ---------- UI Header ----------
@@ -424,6 +439,7 @@ with colB:
 # ---- Alerts (Telegram) ----
 st.sidebar.markdown("---")
 st.sidebar.subheader("Alerts")
+
 if st.sidebar.button("🔔 Telegram Test-Alert senden", use_container_width=True):
     ok = send_telegram("ALADDIN: Test-Alert ✅")
     if ok:
@@ -431,23 +447,30 @@ if st.sidebar.button("🔔 Telegram Test-Alert senden", use_container_width=True
     else:
         st.sidebar.error("Konnte Test-Alert nicht senden (Secrets prüfen).")
 
-# ---- Universe ----
+DEFAULT_FRIENDLY = ["BTCUSD","ETHUSD","SOLUSD","Apple","Tesla","Gold",
+                    "NVIDIA","NASDAQ","S&P 500","MSCI World ETF","STARLINK (SPACE X)"]
+
+# ---- Universe (choose from your set) ----
 DEFAULT_FRIENDLY = [
     "BTCUSD","ETHUSD","SOLUSD",
     "Apple","Tesla","Gold","NVIDIA",
     "NASDAQ","S&P 500","MSCI World ETF","STARLINK (SPACE X)"
 ]
+
 friendly_selection = st.sidebar.multiselect(
     "Universe (choose from your set)",
     options=FRIENDLY_ORDER,
-    default=DEFAULT_FRIENDLY
+    default=DEFAULT_FRIENDLY if preset_toggle else DEFAULT_FRIENDLY
 )
+
+# Harte Absicherung: Whitespace entfernen, Duplikate raus, Unbekannte ignorieren
 friendly_selection = [s.strip() for s in friendly_selection]
-friendly_selection = list(dict.fromkeys(friendly_selection))
+friendly_selection = list(dict.fromkeys(friendly_selection))  # dedupe, order preserving
 unknown = [s for s in friendly_selection if s not in ASSET_MAP]
 if unknown:
     st.sidebar.warning(f"Ignored unknown items in universe: {unknown}")
     friendly_selection = [s for s in friendly_selection if s in ASSET_MAP]
+
 tickers = [ASSET_MAP[s] for s in friendly_selection]
 
 years = st.sidebar.slider("Years of history", 2, 15, value=5)
@@ -460,12 +483,16 @@ crypto_cap = st.sidebar.slider("Crypto cap (group)", 0.00, 0.80, 0.20, step=0.01
 alpha = st.sidebar.slider("Risk alpha (VaR/CVaR)", 0.90, 0.99, 0.95, step=0.01)
 allow_short = st.sidebar.checkbox("Allow short (experimental)", value=False)
 portfolio_value = st.sidebar.number_input("Portfolio value (EUR)", 1000.0, 1e9, 100000.0, step=1000.0, format="%.2f")
+
 target_vol = st.sidebar.slider("Target annualized vol", 0.05, 0.40, 0.12, step=0.01)
 max_leverage = st.sidebar.slider("Max gross leverage", 1.0, 3.0, 1.5, step=0.1)
+
 mom_strength = st.sidebar.slider("Momentum tilt strength", 0.0, 1.0, 0.30, step=0.05)
 mom_lb = st.sidebar.selectbox("Momentum lookback", ["6M","9M","12M"], index=2)
+
 opt_choice = st.sidebar.selectbox("Optimizer", ["Min-Vol", "HRP", "Min-CVaR", "Black-Litterman"], index=0)
 use_ewma = st.sidebar.checkbox("Use EWMA cov in high-vol regime (auto)", value=True)
+
 wf_reb = st.sidebar.selectbox("Backtest rebalance", ["Monthly","Weekly"], index=0)
 wf_cost_bps = st.sidebar.number_input("Base TC (bps per turnover)", 0, 300, 10, step=5)
 wf_impact_k = st.sidebar.slider("Impact coef (sqrt model)", 0.0, 50.0, 8.0, step=0.5)
@@ -473,6 +500,7 @@ wf_turnover_cap = st.sidebar.slider("Turnover cap per rebalance", 0.05, 1.0, 0.3
 wf_min_trade = st.sidebar.slider("Min trade per asset (Δw)", 0.000, 0.050, 0.005, step=0.005)
 wf_adv_days = st.sidebar.slider("ADV window (days)", 10, 60, 20, step=5)
 wf_max_pct_adv = st.sidebar.slider("Max notional per rebalance as %ADV", 1.0, 50.0, 10.0, step=1.0)
+
 mc_block_bootstrap = st.sidebar.checkbox("MC: Block-bootstrap instead of Gaussian", value=True)
 mc_block = st.sidebar.slider("Bootstrap block length (days)", 3, 60, 10)
 mc_horizon = st.sidebar.selectbox("VaR horizon", ["1d","5d","10d"], index=0)
@@ -523,7 +551,7 @@ if len(tickers) == 0:
     st.warning("Bitte mindestens einen Markt wählen."); st.stop()
 
 try:
-    px, vol_df = load_ohlcv(tickers, years=years, clamp_thr=outlier_thr)
+    px, vol = load_ohlcv(tickers, years=years, clamp_thr=outlier_thr)
     if px.empty:
         st.error("Keine Preisdaten geladen — prüfe Ticker."); st.stop()
     rets = to_returns(px).dropna(how="all")
@@ -542,16 +570,19 @@ if dq_missing > 0.02 or dq_min_hist < 250:
 regime = regime_tag(rets)
 use_ewma_now = (use_ewma and regime=="high-vol")
 
+# Black-Litterman views editor (shows tickers but as friendly labels in help)
 default_views = pd.DataFrame({"Asset":[px.columns[0] if len(px.columns) else ""],
                               "Type":["abs"], "Value":[0.08]})
 views_df = None
 if opt_choice == "Black-Litterman":
     st.sidebar.markdown("**Black-Litterman Views**")
     st.sidebar.caption("Type: abs = expected annual return; rel = vs equal basket; relMkt = vs market weights")
+    # We keep 'Asset' as ticker values so the engine works
     choices_df = default_views.copy()
     choices_df["Asset"] = choices_df["Asset"].map(lambda t: t)
     views_df = st.sidebar.data_editor(choices_df, num_rows="dynamic", use_container_width=True)
 
+# Imported weights (blend as 30%)
 imported = st.session_state.get("import_weights")
 if imported is not None:
     imp = imported.reindex(px.columns).fillna(0.0).clip(lower=0.0)
@@ -560,6 +591,7 @@ if imported is not None:
 else:
     imp = None
 
+# Core optimization
 if opt_choice == "Min-Vol":
     w_opt, opt_label = optimizer_min_vol(px, lb=min_w, ub=max_w, use_ewma=use_ewma_now)
 elif opt_choice == "HRP":
@@ -577,9 +609,11 @@ w_opt = w_opt.reindex(px.columns).fillna(0.0)
 if imp is not None and imp.sum()>0:
     w_opt = 0.7*w_opt + 0.3*imp
 
+# Caps
 w_opt = apply_caps(w_opt, crypto_cap, equity_cap, single_cap)
 if w_opt.sum()>0: w_opt = w_opt/w_opt.sum()
 
+# Momentum Tilt
 lb_map = {"6M":126, "9M":189, "12M":252}; lb_days = lb_map[mom_lb]
 mom = (px/px.shift(lb_days) - 1.0).iloc[-1].reindex(w_opt.index).fillna(0.0)
 mom_score = (mom.rank(pct=True) - 0.5)
@@ -635,18 +669,16 @@ with tab_overview:
     with L:
         st.subheader("Portfolio Overview (target)")
         ytd = {t: rets[t].loc[rets.index.year==rets.index[-1].year].sum() if t in rets.columns else 0.0 for t in px.columns}
-        w_opt_local = w_opt.astype(float)
+        
+        # --- Fix: alles in float casten, damit keine object-dtypes entstehen ---
+        w_opt = w_opt.astype(float)
         ytd_series = pd.to_numeric(pd.Series(ytd), errors="coerce").fillna(0.0)
-        df_over = pd.DataFrame({"Weight": w_opt_local.round(4), "YTD Return": ytd_series.round(4)})
+        df_over = pd.DataFrame({"Weight": w_opt.round(4), "YTD Return": ytd_series.round(4)})
         df_over.index = labelize(df_over.index.tolist())
         st.dataframe(df_over, use_container_width=True)
         st.download_button("Export Weights (JSON)",
-            data=json.dumps({k: float(v) for k,v in w_opt_local.round(6).to_dict().items()}, indent=2).encode(),
+            data=json.dumps({k: float(v) for k,v in w_opt.round(6).to_dict().items()}, indent=2).encode(),
             file_name="weights.json", mime="application/json")
-        if st.button("📲 Weights an Telegram senden"):
-            nice = {TICKER_TO_FRIENDLY.get(k,k): f"{float(v):.1%}" for k,v in w_opt.items()}
-            ok_msg = send_telegram(f"ALADDIN Weights {datetime.now():%Y-%m-%d %H:%M}:\n" + json.dumps(nice, indent=2))
-            st.success("Gesendet.") if ok_msg else st.error("Senden fehlgeschlagen.")
     with R:
         st.subheader("Risk Metrics (post-scale)")
         df_risk = pd.DataFrame({
@@ -802,41 +834,48 @@ with tab_backtest:
         mom_strength=mom_strength, mom_lb_days=lb_days
     )
 
-    bench_choices_friendly = ["Gold", "NASDAQ", "S&P 500", "MSCI World ETF",
-                              "BTCUSD", "ETHUSD", "SOLUSD", "Apple", "Tesla", "NVIDIA"]
-    bench_label = st.selectbox("Benchmark", bench_choices_friendly, index=0, key="bench")
-    bench_ticker = ASSET_MAP.get(bench_label, bench_label)
+    # --- Benchmark (Friendly -> Ticker) ---
+bench_choices_friendly = ["Gold", "NASDAQ", "S&P 500", "MSCI World ETF",
+                          "BTCUSD", "ETHUSD", "SOLUSD", "Apple", "Tesla", "NVIDIA"]
+bench_label = st.selectbox("Benchmark", bench_choices_friendly, index=0, key="bench")
 
-    try:
-        bench_raw = _download_with_retry(bench_ticker, period=f"{bt_years}y")
-        bench_px = _normalize_price_frame(bench_raw)
-        if isinstance(bench_px, pd.DataFrame):
-            if "Close" in bench_px.columns: 
-                bench_px = bench_px["Close"]
-            elif "Adj Close" in bench_px.columns:
-                bench_px = bench_px["Adj Close"]
-            else:
-                bench_px = bench_px.iloc[:, 0]
-        bench_px = bench_px.dropna()
-    except Exception:
-        bench_px = pd.Series(dtype=float)
+# Map Friendly -> Ticker via ASSET_MAP (oben definiert)
+bench_ticker = ASSET_MAP.get(bench_label, bench_label)
 
-    if bench_px.empty:
-        st.warning(f"Keine Benchmark-Daten für '{bench_label}' (Ticker '{bench_ticker}'). Prüfe Mapping in ASSET_MAP.")
-        bench_eq = pd.Series(index=eq.index, dtype=float)
-    else:
-        common = eq.index.intersection(bench_px.index)
-        bench_px = bench_px.loc[common]
-        bench_eq = bench_px / bench_px.iloc[0]
+# Robust download + Normalisierung
+try:
+    # gleiche Historie wie Backtest
+    bench_raw = _download_with_retry(bench_ticker, period=f"{bt_years}y")
+    bench_px = _normalize_price_frame(bench_raw)
+    # Serie extrahieren
+    if isinstance(bench_px, pd.DataFrame):
+        if "Close" in bench_px.columns: 
+            bench_px = bench_px["Close"]
+        elif "Adj Close" in bench_px.columns:
+            bench_px = bench_px["Adj Close"]
+        else:
+            bench_px = bench_px.iloc[:, 0]
+    bench_px = bench_px.dropna()
+except Exception:
+    bench_px = pd.Series(dtype=float)
 
-    port_eq  = eq.loc[bench_eq.index] / eq.loc[bench_eq.index].iloc[0]
+if bench_px.empty:
+    st.warning(f"Keine Benchmark-Daten für '{bench_label}' (Ticker '{bench_ticker}'). Prüfe Mapping in ASSET_MAP.")
+    bench_eq = pd.Series(index=eq.index, dtype=float)
+else:
+    # Indizes auf Schnittmenge bringen und auf 1.0 normieren
+    common = eq.index.intersection(bench_px.index)
+    bench_px = bench_px.loc[common]
+    bench_eq = bench_px / bench_px.iloc[0]
 
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=port_eq.index,  y=port_eq.values,  name="Portfolio", mode="lines"))
-    if not bench_eq.empty:
-        fig.add_trace(go.Scatter(x=bench_eq.index, y=bench_eq.values, name=bench_label, mode="lines"))
-    fig.update_layout(title="Index (Start=1.0)", xaxis_title="Date", yaxis_title="Index", height=420, template="aladdin")
-    st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CFG)
+port_eq  = eq.loc[bench_eq.index] / eq.loc[bench_eq.index].iloc[0]
+
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=port_eq.index,  y=port_eq.values,  name="Portfolio", mode="lines"))
+if not bench_eq.empty:
+    fig.add_trace(go.Scatter(x=bench_eq.index, y=bench_eq.values, name=bench_label, mode="lines"))
+fig.update_layout(title="Index (Start=1.0)", xaxis_title="Date", yaxis_title="Index", height=420, template="aladdin")
+st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CFG)
 
 # ---------- Purged K-Fold CV + Deflated Sharpe ----------
 def time_series_folds(index: pd.DatetimeIndex, k: int=5, embargo: int=10):
@@ -874,12 +913,13 @@ with tab_cv:
     else:
         st.info("Zu wenig History für CV. Erhöhe 'Years of history' oder nutze breiteres Universum.")
 
-# ---------- Factors ----------
+# ---------- Factors (friendly labels only) ----------
 with tab_factors:
     st.subheader("Factor Attribution (Daily Returns Regression)")
+    # Friendly -> ticker
     factor_map = {
-        "S&P 500": ASSET_MAP["S&P 500"],   # SPY
-        "NASDAQ": ASSET_MAP["NASDAQ"],     # QQQ
+        "S&P 500": ASSET_MAP["S&P 500"],   # SPY (hidden)
+        "NASDAQ": ASSET_MAP["NASDAQ"],     # QQQ (hidden)
         "Gold": ASSET_MAP["Gold"],         # GLD
         "USD (proxy)": "UUP"
     }
@@ -888,7 +928,7 @@ with tab_factors:
 
     y = port_eff.reindex(fac_rets.index).dropna()
     X = fac_rets.reindex(y.index).fillna(0.0).copy()
-    X.columns = list(factor_map.keys())
+    X.columns = list(factor_map.keys())  # show friendly names
 
     beta = {}; r2 = 0.0
     try:
@@ -912,6 +952,7 @@ with tab_factors:
 with tab_stress:
     st.subheader("Instant & Historical Stress")
     st.caption("1-Day shocks & historical scenarios mapped to portfolio (post-scale).")
+    # Note: keys are tickers (engine), but users never see them.
     scenario_lib = {
         "Tech + Crypto Crash": {"AAPL": -0.15, "TSLA": -0.18, "QQQ": -0.12, "BTC-USD": -0.25, "ETH-USD": -0.35, "NVDA": -0.16},
         "Rates Spike": {"URTH": -0.05, "SPY": -0.04, "GLD": -0.03},
@@ -954,6 +995,7 @@ with tab_trades:
     show_df = pd.DataFrame({"Current": st.session_state.current_weights.round(4)})
     show_df.index = labelize(list(show_df.index))
     edited = st.data_editor(show_df, use_container_width=True, key="cur_edit")
+    # Map back friendly -> ticker for calculations
     current = edited["Current"]
     current.index = [ASSET_MAP.get(n, next((t for t,f in TICKER_TO_FRIENDLY.items() if f==n), n)) for n in current.index]
     current = current.reindex(w_opt.index).fillna(0.0)
@@ -1110,4 +1152,5 @@ with tab_report:
     """
     st.download_button("Download HTML Report", data=html.encode("utf-8"),
                        file_name="aladdin_report.html", mime="text/html")
+
 # ================== END ==================
