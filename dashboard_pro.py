@@ -85,8 +85,10 @@ hr { border:none; height:1px; background:linear-gradient(90deg,transparent,rgba(
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 st.markdown('<div class="background-grid"></div>', unsafe_allow_html=True)
 
-# ---------- Assets (friendly -> ticker map) ----------
-ASSET_MAP = {
+# ---------- Assets: friendly -> ticker ----------
+# Friendly names are exactly your list; UI shows only these.
+ASSET_MAP: Dict[str, str] = {
+    "BTCSD": "BTC-USD",           # alias (common typo)
     "BTCUSD": "BTC-USD",
     "ETHUSD": "ETH-USD",
     "SOLUSD": "SOL-USD",
@@ -94,18 +96,17 @@ ASSET_MAP = {
     "Tesla": "TSLA",
     "Gold": "GLD",
     "NVIDIA": "NVDA",
-    "NASDAQ": "QQQ",         # Nasdaq-100 proxy
-    "S&P 500": "SPY",        # S&P 500 proxy
+    "NASDAQ": "QQQ",              # proxy Nasdaq-100
+    "S&P 500": "SPY",             # proxy S&P 500
     "MSCI World ETF": "URTH",
-    "STARLINK (SPACE X)": "UFO"
+    "STARLINK (SPACE X)": "UFO",  # space economy ETF as proxy
 }
-FRIENDLY_ORDER = list(ASSET_MAP.keys())
+FRIENDLY_ORDER = ["BTCSD","BTCUSD","ETHUSD","SOLUSD","Apple","Tesla","Gold",
+                  "NVIDIA","NASDAQ","S&P 500","MSCI World ETF","STARLINK (SPACE X)"]
 
-# Simple group tags for caps
-CRYPTO_KEYS = ("BTC-USD", "ETH-USD", "SOL-USD")
-EQUITY_TICKERS = {"AAPL", "TSLA", "NVDA", "QQQ", "SPY", "URTH", "UFO"}
-
-CRYPTO_TICKERS = CRYPTO_KEYS  # alias to avoid NameError
+# Group tags for caps
+CRYPTO_TICKERS = {"BTC-USD","ETH-USD","SOL-USD"}
+EQUITY_TICKERS = {"AAPL","TSLA","NVDA","QQQ","SPY","URTH","UFO"}  # can extend
 
 # Helpers for label mapping
 TICKER_TO_FRIENDLY = {}
@@ -359,37 +360,26 @@ def optimizer_black_litterman(px_hist: pd.DataFrame, lb: float, ub: float,
 # ---------- Caps & Constraints ----------
 def apply_caps(weights: pd.Series, crypto_cap: float, equity_cap: float, single_cap: float) -> pd.Series:
     w = weights.copy().fillna(0.0).astype(float)
-
-    # 1) Single-Asset Cap (harte Obergrenze je Asset)
     if single_cap < 1.0:
         w = w.clip(upper=single_cap)
-        if w.sum() > 0:
-            w /= w.sum()
-
-    # 2) Crypto-Gruppencap
-    crypto_cols = [c for c in w.index if c in CRYPTO_KEYS]
+        if w.sum()>0: w /= w.sum()
+    crypto_cols = [c for c in w.index if c in CRYPTO_TICKERS]
     if crypto_cols:
-        cs = float(w.loc[crypto_cols].clip(lower=0).sum())
+        cs = float(pd.Series(w.loc[crypto_cols]).clip(lower=0).sum())
         if crypto_cap <= 0:
             w.loc[crypto_cols] = 0.0
-            if w.sum() > 0:
-                w /= w.sum()
+            if w.sum()>0: w /= w.sum()
         elif cs > crypto_cap and cs > 0:
             scale = crypto_cap / cs
-            w.loc[crypto_cols] = w.loc[crypto_cols] * scale
-            if w.sum() > 0:
-                w /= w.sum()
-
-    # 3) Equity-Gruppencap
+            w.loc[crypto_cols] = w.loc[crypto_cols]*scale
+            if w.sum()>0: w /= w.sum()
     eq_cols = [c for c in w.index if c in EQUITY_TICKERS]
     if eq_cols and equity_cap < 1.0:
-        es = float(w.loc[eq_cols].clip(lower=0).sum())
+        es = float(pd.Series(w.loc[eq_cols]).clip(lower=0).sum())
         if es > equity_cap and es > 0:
             scale = equity_cap / es
-            w.loc[eq_cols] = w.loc[eq_cols] * scale
-            if w.sum() > 0:
-                w /= w.sum()
-
+            w.loc[eq_cols] = w.loc[eq_cols]*scale
+            if w.sum()>0: w /= w.sum()
     return w
 
 # ---------- UI Header ----------
@@ -411,29 +401,12 @@ with colB:
 
 DEFAULT_FRIENDLY = ["BTCUSD","ETHUSD","SOLUSD","Apple","Tesla","Gold",
                     "NVIDIA","NASDAQ","S&P 500","MSCI World ETF","STARLINK (SPACE X)"]
-
-# ---- Universe (choose from your set) ----
-DEFAULT_FRIENDLY = [
-    "BTCUSD","ETHUSD","SOLUSD",
-    "Apple","Tesla","Gold","NVIDIA",
-    "NASDAQ","S&P 500","MSCI World ETF","STARLINK (SPACE X)"
-]
-
 friendly_selection = st.sidebar.multiselect(
     "Universe (choose from your set)",
     options=FRIENDLY_ORDER,
     default=DEFAULT_FRIENDLY if preset_toggle else DEFAULT_FRIENDLY
 )
-
-# Harte Absicherung: Whitespace entfernen, Duplikate raus, Unbekannte ignorieren
-friendly_selection = [s.strip() for s in friendly_selection]
-friendly_selection = list(dict.fromkeys(friendly_selection))  # dedupe, order preserving
-unknown = [s for s in friendly_selection if s not in ASSET_MAP]
-if unknown:
-    st.sidebar.warning(f"Ignored unknown items in universe: {unknown}")
-    friendly_selection = [s for s in friendly_selection if s in ASSET_MAP]
-
-tickers = [ASSET_MAP[s] for s in friendly_selection]
+tickers = [ASSET_MAP[x] for x in friendly_selection if x in ASSET_MAP]
 
 years = st.sidebar.slider("Years of history", 2, 15, value=5)
 outlier_thr = st.sidebar.slider("Outlier clamp (1d move)", 0.20, 0.80, 0.40, 0.05)
@@ -631,11 +604,7 @@ with tab_overview:
     with L:
         st.subheader("Portfolio Overview (target)")
         ytd = {t: rets[t].loc[rets.index.year==rets.index[-1].year].sum() if t in rets.columns else 0.0 for t in px.columns}
-        
-        # --- Fix: alles in float casten, damit keine object-dtypes entstehen ---
-        w_opt = w_opt.astype(float)
-        ytd_series = pd.to_numeric(pd.Series(ytd), errors="coerce").fillna(0.0)
-        df_over = pd.DataFrame({"Weight": w_opt.round(4), "YTD Return": ytd_series.round(4)})
+        df_over = pd.DataFrame({"Weight": w_opt.round(4), "YTD Return": pd.Series(ytd).round(4)})
         df_over.index = labelize(df_over.index.tolist())
         st.dataframe(df_over, use_container_width=True)
         st.download_button("Export Weights (JSON)",
@@ -796,48 +765,47 @@ with tab_backtest:
         mom_strength=mom_strength, mom_lb_days=lb_days
     )
 
-    # --- Benchmark (Friendly -> Ticker) ---
-bench_choices_friendly = ["Gold", "NASDAQ", "S&P 500", "MSCI World ETF",
-                          "BTCUSD", "ETHUSD", "SOLUSD", "Apple", "Tesla", "NVIDIA"]
-bench_label = st.selectbox("Benchmark", bench_choices_friendly, index=0, key="bench")
+    # Benchmarks shown by friendly name (mapped internally)
+    BENCH_FRIENDLY = ["S&P 500","NASDAQ","MSCI World ETF","Gold"]
+    BENCH_MAP = {f: ASSET_MAP[f] for f in BENCH_FRIENDLY}
+    bench_friendly = st.selectbox("Benchmark", BENCH_FRIENDLY, index=0, key="bench_friendly")
+    bench_ticker = BENCH_MAP[bench_friendly]
 
-# Map Friendly -> Ticker via ASSET_MAP (oben definiert)
-bench_ticker = ASSET_MAP.get(bench_label, bench_label)
+    bench_px_raw = _download_with_retry(bench_ticker, period=f"{bt_years}y")
+    try:
+        bench_px = _normalize_price_frame(bench_px_raw)["Close"].dropna()
+    except Exception:
+        bench_px = yf.download(bench_ticker, period=f"{bt_years}y", auto_adjust=True, progress=False)["Close"].dropna()
 
-# Robust download + Normalisierung
-try:
-    # gleiche Historie wie Backtest
-    bench_raw = _download_with_retry(bench_ticker, period=f"{bt_years}y")
-    bench_px = _normalize_price_frame(bench_raw)
-    # Serie extrahieren
-    if isinstance(bench_px, pd.DataFrame):
-        if "Close" in bench_px.columns: 
-            bench_px = bench_px["Close"]
-        elif "Adj Close" in bench_px.columns:
-            bench_px = bench_px["Adj Close"]
-        else:
-            bench_px = bench_px.iloc[:, 0]
-    bench_px = bench_px.dropna()
-except Exception:
-    bench_px = pd.Series(dtype=float)
-
-if bench_px.empty:
-    st.warning(f"Keine Benchmark-Daten für '{bench_label}' (Ticker '{bench_ticker}'). Prüfe Mapping in ASSET_MAP.")
-    bench_eq = pd.Series(index=eq.index, dtype=float)
-else:
-    # Indizes auf Schnittmenge bringen und auf 1.0 normieren
     common = eq.index.intersection(bench_px.index)
-    bench_px = bench_px.loc[common]
-    bench_eq = bench_px / bench_px.iloc[0]
+    bench_eq = bench_px.loc[common] / bench_px.loc[common].iloc[0]
+    port_eq  = eq.loc[common] / eq.loc[common].iloc[0]
 
-port_eq  = eq.loc[bench_eq.index] / eq.loc[bench_eq.index].iloc[0]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=common, y=port_eq.values,  name="Portfolio", mode="lines"))
+    fig.add_trace(go.Scatter(x=common, y=bench_eq.values, name=bench_friendly, mode="lines"))
+    fig.update_layout(title="Index (Start=1.0)", xaxis_title="Date", yaxis_title="Index", height=420, template="aladdin")
+    st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CFG)
 
-fig = go.Figure()
-fig.add_trace(go.Scatter(x=port_eq.index,  y=port_eq.values,  name="Portfolio", mode="lines"))
-if not bench_eq.empty:
-    fig.add_trace(go.Scatter(x=bench_eq.index, y=bench_eq.values, name=bench_label, mode="lines"))
-fig.update_layout(title="Index (Start=1.0)", xaxis_title="Date", yaxis_title="Index", height=420, template="aladdin")
-st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CFG)
+    bt_ret = eq.pct_change().dropna(); n = len(bt_ret) if len(bt_ret) else 1
+    bt_cagr = (eq.iloc[-1] ** (252/n)) - 1 if len(eq) else 0.0
+    bt_vol  = bt_ret.std()*np.sqrt(252) if len(bt_ret) else 0.0
+    bt_sha  = (bt_ret.mean()/bt_ret.std())*np.sqrt(252) if len(bt_ret) and bt_ret.std()!=0 else 0.0
+    bt_mdd  = float((eq/eq.cummax() - 1.0).min()) if len(eq) else 0.0
+    tc_ann  = float(tc_series.mean()*252) if len(tc_series) else 0.0
+
+    c1,c2,c3,c4,c5 = st.columns(5)
+    c1.metric("Backtest CAGR", f"{bt_cagr:.2%}")
+    c2.metric("Backtest Vol", f"{bt_vol:.2%}")
+    c3.metric("Backtest Sharpe", f"{bt_sha:.2f}")
+    c4.metric("Backtest MaxDD", f"{bt_mdd:.2%}")
+    c5.metric("Avg TC (ann.)", f"{tc_ann:.2%}")
+
+    if len(port_eq) and len(bench_eq):
+        outp = float(port_eq.iloc[-1] / bench_eq.iloc[-1] - 1.0)
+        st.markdown(f"**Outperformance vs {bench_friendly}: {outp:.2%}**")
+    else:
+        st.markdown("Outperformance: n/a")
 
 # ---------- Purged K-Fold CV + Deflated Sharpe ----------
 def time_series_folds(index: pd.DatetimeIndex, k: int=5, embargo: int=10):
@@ -1116,3 +1084,4 @@ with tab_report:
                        file_name="aladdin_report.html", mime="text/html")
 
 # ================== END ==================
+
