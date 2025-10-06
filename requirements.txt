@@ -1,7 +1,10 @@
-streamlit
-yfinance
-pandas
-numpy
-plotly
-matplotlib
-requests
+streamlit>=1.32
+yfinance>=0.2
+pandas>=2.0
+numpy>=1.24
+plotly>=5.18
+matplotlib>=3.7
+requests>=2.31
+PyPortfolioOpt>=1.5
+statsmodels>=0.14
+scikit-learn>=1.3
